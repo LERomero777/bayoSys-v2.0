@@ -1,67 +1,257 @@
-from typing import List
-from dataclasses import dataclass
+"""
+calcular.py — bayoSys · Productos El Bayo
+Toda la aritmética del negocio. No sabe nada de JSON ni de curses.
+Recibe modelos, devuelve resultados.
 
-from bayosys.models import (
-    Batch,
-    KG_GRASA_POR_CUBETA,
-    LT_POR_CUBETA,
-    DENSIDAD_MANTECA,
-    REND_MANT_KG,
-    REND_UMBRAL,
+CAMBIOS junio 2026:
+  - Eliminado bloque INIX (inix_pzas, ing_mant_inix, margen_inix_pct)
+  - ResultadoDia.ing_mant = proyección simple toda-a-cubeta
+  - El desglose real litreada/cubeta lo calcula cierre.py con CierreDia
+  - mix_mant_inix_pct eliminado de Config — no existe más
+"""
+
+from models import (
+    Batch, Config, ResultadoBatch, ResultadoDia,
+    KG_GRASA_POR_CUBETA, LT_POR_CUBETA, DENSIDAD_MANTECA,
+    REND_MANT_KG
 )
+from typing import List
 
 
-@dataclass
-class ResultadoBatch:
-    """Resultados derivados de un Batch. Nunca se persiste en JSON."""
+# ── BATCH ────────────────────────────────────────────────────────────────────
 
-    batch_id: int
-    kg_grasa_cazo: float    # heredado de Batch.kg_grasa_cazo
-    kg_mant: float          # kg_grasa × REND_MANT_KG
-    lt_mant: float          # kg_grasa × LT_POR_CUBETA / KG_GRASA_POR_CUBETA
-    cubetas: float          # lt_mant / LT_POR_CUBETA  →  kg_grasa / KG_GRASA_POR_CUBETA
-    rend_proceso: float     # kg_chi / kg_grasa_cazo × 100  — evalúa cazo y operador
-    rend_economico: float   # kg_chi / kg_grasa       × 100  — evalúa negocio y proveedor
-    alerta_humo: bool       # True si temp_cazo >= TEMP_HUMO
-    alerta_rend: bool       # True si rend_proceso < 20.0
-
-
-def calcular_batch(batch: Batch) -> ResultadoBatch:
+def calcular_batch(batch: Batch, cfg: Config, n_batches: int) -> ResultadoBatch:
     """
-    Calcula métricas derivadas de un Batch ya cargado.
-
-    Args:
-        batch: instancia de Batch con etapa 1 completa (kg_grasa > 0).
-
-    Returns:
-        ResultadoBatch con todos los campos calculados.
-
-    Notas:
-        - Si kg_grasa_cazo == 0 (batch incompleto), rend_proceso queda en 0.0.
-        - Si kg_grasa == 0, rend_economico queda en 0.0.
-        - cubetas es equivalente algebraico de lt_mant / LT_POR_CUBETA.
+    Calcula todos los resultados de un batch individual.
+    n_batches: total de batches del día (informativo, los fijos van en calcular_dia).
     """
-    kg_grasa_cazo = batch.kg_grasa_cazo  # propiedad de Batch
 
-    kg_mant = batch.kg_grasa * REND_MANT_KG
-    lt_mant = batch.kg_grasa * LT_POR_CUBETA / KG_GRASA_POR_CUBETA
-    cubetas = batch.kg_grasa / KG_GRASA_POR_CUBETA  # == lt_mant / LT_POR_CUBETA
+    # producción derivada
+    kg_mant  = batch.kg_grasa * REND_MANT_KG
+    lt_mant  = kg_mant / DENSIDAD_MANTECA
+    cubetas  = batch.kg_grasa / KG_GRASA_POR_CUBETA
+    merma_kg = batch.kg_grasa - batch.kg_chi - kg_mant
 
-    rend_proceso = (
-        (batch.kg_chi / kg_grasa_cazo * 100) if kg_grasa_cazo > 0 else 0.0
-    )
-    rend_economico = (
-        (batch.kg_chi / batch.kg_grasa * 100) if batch.kg_grasa > 0 else 0.0
-    )
+    # rendimientos
+    rend_chi_pct  = batch.kg_chi / batch.kg_grasa * 100
+    rend_mant_pct = kg_mant      / batch.kg_grasa * 100
+    merma_pct     = 100 - rend_chi_pct - rend_mant_pct
+
+    # costos del batch — solo variables (sin fijos del día)
+    c_grasa   = batch.kg_grasa * batch.costo_kg
+    c_destajo = batch.kg_grasa * cfg.destajo_kg
+    c_batch   = c_grasa + c_destajo
+
+    # costo por unidad aproximado (sin fijos — útil para vista previa en registro)
+    c_chi_unit  = (c_batch * cfg.alpha) / batch.kg_chi if batch.kg_chi > 0 else 0.0
+    c_mant_unit = (c_batch * cfg.beta)  / kg_mant      if kg_mant      > 0 else 0.0
+
+    # métrica de comparación entre proveedores
+    costo_real_kg_chi = c_grasa / batch.kg_chi if batch.kg_chi > 0 else 0.0
 
     return ResultadoBatch(
-        batch_id=batch.id,
-        kg_grasa_cazo=kg_grasa_cazo,
-        kg_mant=kg_mant,
-        lt_mant=lt_mant,
-        cubetas=cubetas,
-        rend_proceso=rend_proceso,
-        rend_economico=rend_economico,
-        alerta_humo=batch.humo_riesgo,
-        alerta_rend=rend_proceso < 20.0,
+        batch_id          = batch.id,
+        kg_mant           = round(kg_mant,  4),
+        lt_mant           = round(lt_mant,  4),
+        cubetas           = round(cubetas,  4),
+        merma_kg          = round(merma_kg, 4),
+        rend_chi_pct      = round(rend_chi_pct,  4),
+        rend_mant_pct     = round(rend_mant_pct, 4),
+        merma_pct         = round(merma_pct,     4),
+        c_grasa           = round(c_grasa,    2),
+        c_batch           = round(c_batch,    2),
+        c_chi_unit        = round(c_chi_unit,  2),
+        c_mant_unit       = round(c_mant_unit, 2),
+        costo_real_kg_chi = round(costo_real_kg_chi, 2),
     )
+
+
+# ── DÍA ──────────────────────────────────────────────────────────────────────
+
+def calcular_dia(batches: List[Batch], cfg: Config,
+                 c_gas_dia: float = 0.0) -> ResultadoDia:
+    """
+    Agrega todos los batches del día y calcula resultados globales.
+
+    c_gas_dia: costo real del ticket de la gasera ese día.
+               Se pasa desde cierre.py.
+               Si no se pasa (análisis sin cierre) queda en 0.
+
+    NOTA: ing_mant es proyección simple (toda la manteca a precio cubeta).
+          El ingreso real de manteca (litreada + cubetas) se calcula en
+          cierre.py con los datos reales de CierreDia.
+    """
+    if not batches:
+        raise ValueError("No hay batches para calcular")
+
+    fecha     = batches[0].fecha
+    n_batches = len(batches)
+
+    # producción total
+    kg_grasa_dia = sum(b.kg_grasa for b in batches)
+    kg_chi_dia   = sum(b.kg_chi   for b in batches)
+    kg_mant_dia  = kg_grasa_dia * REND_MANT_KG
+    lt_mant_dia  = kg_mant_dia / DENSIDAD_MANTECA
+    cubetas_dia  = kg_grasa_dia / KG_GRASA_POR_CUBETA
+    merma_kg_dia = kg_grasa_dia - kg_chi_dia - kg_mant_dia
+
+    # rendimientos
+    rend_chi_pct  = kg_chi_dia  / kg_grasa_dia * 100
+    rend_mant_pct = kg_mant_dia / kg_grasa_dia * 100
+    merma_pct     = 100 - rend_chi_pct - rend_mant_pct
+
+    # costos
+    c_grasa_dia = sum(b.kg_grasa * b.costo_kg for b in batches)
+    c_destajo   = kg_grasa_dia * cfg.destajo_kg
+    c_fijos     = cfg.diario_empleado + cfg.leche_dia + c_gas_dia
+    c_total_dia = c_grasa_dia + c_destajo + c_fijos
+
+    c_chi_unit  = (c_total_dia * cfg.alpha) / kg_chi_dia  if kg_chi_dia  > 0 else 0.0
+    c_mant_unit = (c_total_dia * cfg.beta)  / kg_mant_dia if kg_mant_dia > 0 else 0.0
+
+    # canales chicharrón (proyección por mix)
+    chi_pub_kg  = kg_chi_dia * (cfg.mix_chi_pub_pct / 100)
+    chi_may_kg  = kg_chi_dia - chi_pub_kg
+    ing_chi_pub = chi_pub_kg * cfg.precio_chi_pub
+    ing_chi_may = chi_may_kg * cfg.precio_chi_may
+    ing_chi     = ing_chi_pub + ing_chi_may
+
+    # manteca — proyección simple: toda a cubeta (referencia / peor caso)
+    # El desglose real (litreada vs cubeta) lo maneja CierreDia
+    cubetas_proyec = lt_mant_dia / LT_POR_CUBETA
+    ing_mant       = cubetas_proyec * cfg.precio_mant_cub
+
+    # resultado proyectado
+    ing_total = ing_chi + ing_mant
+    utilidad  = ing_total - c_total_dia
+
+    # métricas
+    p_mant_lt = cfg.precio_mant_cub / LT_POR_CUBETA
+
+    margen_chi_pub_pct  = (cfg.precio_chi_pub - c_chi_unit) / cfg.precio_chi_pub * 100
+    margen_chi_may_pct  = (cfg.precio_chi_may - c_chi_unit) / cfg.precio_chi_may * 100
+    margen_mant_cub_pct = (p_mant_lt - c_mant_unit) / p_mant_lt * 100 if p_mant_lt > 0 else 0.0
+
+    precio_min_chi   = c_chi_unit
+    precio_justo_chi = c_chi_unit / 0.65
+    precio_prem_chi  = c_chi_unit / 0.45
+    util_mensual     = utilidad * 25
+
+    return ResultadoDia(
+        fecha         = fecha,
+        n_batches     = n_batches,
+        kg_grasa_dia  = round(kg_grasa_dia, 3),
+        kg_chi_dia    = round(kg_chi_dia,   3),
+        kg_mant_dia   = round(kg_mant_dia,  3),
+        lt_mant_dia   = round(lt_mant_dia,  3),
+        cubetas_dia   = round(cubetas_dia,  3),
+        merma_kg_dia  = round(merma_kg_dia, 3),
+        rend_chi_pct  = round(rend_chi_pct,  2),
+        rend_mant_pct = round(rend_mant_pct, 2),
+        merma_pct     = round(merma_pct,     2),
+        c_grasa_dia   = round(c_grasa_dia, 2),
+        c_total_dia   = round(c_total_dia, 2),
+        c_chi_unit    = round(c_chi_unit,  2),
+        c_mant_unit   = round(c_mant_unit, 2),
+        chi_pub_kg    = round(chi_pub_kg,  3),
+        chi_may_kg    = round(chi_may_kg,  3),
+        ing_chi_pub   = round(ing_chi_pub, 2),
+        ing_chi_may   = round(ing_chi_may, 2),
+        ing_chi       = round(ing_chi,     2),
+        ing_mant      = round(ing_mant,    2),
+        ing_total     = round(ing_total,   2),
+        utilidad      = round(utilidad,    2),
+        margen_chi_pub_pct  = round(margen_chi_pub_pct,  2),
+        margen_chi_may_pct  = round(margen_chi_may_pct,  2),
+        margen_mant_cub_pct = round(margen_mant_cub_pct, 2),
+        precio_min_chi   = round(precio_min_chi,   2),
+        precio_justo_chi = round(precio_justo_chi, 2),
+        precio_prem_chi  = round(precio_prem_chi,  2),
+        util_mensual     = round(util_mensual,     2),
+    )
+
+
+# ── INGRESO REAL DE MANTECA (desde cierre) ────────────────────────────────────
+
+def calcular_ing_manteca_real(cierre, cfg: Config) -> dict:
+    """
+    Calcula el ingreso real de manteca a partir de un CierreDia.
+    Separado de calcular_dia porque requiere datos de ventas reales.
+
+    Retorna dict con desglose completo para que cierre.py y analisis.py
+    puedan mostrar sin duplicar lógica.
+    """
+    from models import LT_POR_ENV_1LT, LT_POR_ENV_05LT
+
+    # litreada
+    lt_vendidos_1lt  = sum(v.env_1lt  * LT_POR_ENV_1LT  for v in cierre.ventas_litreada)
+    lt_vendidos_05lt = sum(v.env_05lt * LT_POR_ENV_05LT for v in cierre.ventas_litreada)
+    env_1lt_total    = sum(v.env_1lt  for v in cierre.ventas_litreada)
+    env_05lt_total   = sum(v.env_05lt for v in cierre.ventas_litreada)
+    lt_litreada_total = lt_vendidos_1lt + lt_vendidos_05lt
+
+    ing_litreada_1lt  = env_1lt_total  * cfg.precio_mant_lt1
+    ing_litreada_05lt = env_05lt_total * cfg.precio_mant_lt05
+    ing_litreada      = ing_litreada_1lt + ing_litreada_05lt
+
+    # cubetas
+    cubetas_vendidas = sum(v.cantidad for v in cierre.ventas_cubeta)
+    ing_cubetas      = sum(v.cantidad * v.precio for v in cierre.ventas_cubeta)
+
+    # precio promedio por litro litreada (para analisis)
+    p_prom_lt = ing_litreada / lt_litreada_total if lt_litreada_total > 0 else 0.0
+
+    # precio por litro en cubeta (para comparativo)
+    p_cub_lt = cfg.precio_mant_cub / LT_POR_CUBETA
+
+    return dict(
+        env_1lt_total     = env_1lt_total,
+        env_05lt_total    = env_05lt_total,
+        lt_litreada_total = round(lt_litreada_total, 3),
+        ing_litreada_1lt  = round(ing_litreada_1lt,  2),
+        ing_litreada_05lt = round(ing_litreada_05lt, 2),
+        ing_litreada      = round(ing_litreada,      2),
+        cubetas_vendidas  = cubetas_vendidas,
+        ing_cubetas       = round(ing_cubetas,       2),
+        ing_mant_real     = round(ing_litreada + ing_cubetas, 2),
+        p_prom_lt         = round(p_prom_lt, 2),
+        p_cub_lt          = round(p_cub_lt,  2),
+    )
+
+
+# ── COMPARATIVO DE PROVEEDORES ────────────────────────────────────────────────
+
+def comparar_proveedores(batches: List[Batch]) -> dict:
+    """
+    Agrupa batches por proveedor y calcula costo_real_kg_chi promedio.
+    Devuelve dict: { clave_proveedor: { stats } }
+    """
+    grupos: dict = {}
+
+    for b in batches:
+        if b.proveedor not in grupos:
+            grupos[b.proveedor] = {
+                "batches":     0,
+                "kg_grasa":    0.0,
+                "kg_chi":      0.0,
+                "costo_grasa": 0.0,
+            }
+        g = grupos[b.proveedor]
+        g["batches"]     += 1
+        g["kg_grasa"]    += b.kg_grasa
+        g["kg_chi"]      += b.kg_chi
+        g["costo_grasa"] += b.kg_grasa * b.costo_kg
+
+    resultado = {}
+    for clave, g in grupos.items():
+        rend_chi   = g["kg_chi"] / g["kg_grasa"] * 100 if g["kg_grasa"] > 0 else 0
+        costo_real = g["costo_grasa"] / g["kg_chi"]    if g["kg_chi"]   > 0 else 0
+        resultado[clave] = {
+            "batches":           g["batches"],
+            "kg_grasa_total":    round(g["kg_grasa"],  2),
+            "kg_chi_total":      round(g["kg_chi"],    2),
+            "rend_chi_pct":      round(rend_chi,       2),
+            "costo_real_kg_chi": round(costo_real,     2),
+        }
+
+    return resultado

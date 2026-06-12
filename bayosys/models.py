@@ -1,133 +1,207 @@
-
 """
-models.py - bayoSys v2.0
-Estructuras de datos. No sabe nada de JSON, curses ni aritmetica.
+models.py — bayoSys · Productos El Bayo
+Estructuras de datos. No sabe nada de JSON, curses ni aritmética.
 
-v2.0: campos de telemetria, materia prima extendida, insumos, sensor.
-Backward compat total con JSON v1 - campos nuevos son Optional con default.
+MEDICIONES DE CAMPO (báscula digital):
+  kg_grasa  — ANTES de echar al cazo
+  kg_chi    — DESPUÉS de sacar el chicharrón
+  Todo lo demás se calcula en calcular.py
+
+MANTECA — modelo revisado (junio 2026):
+  - Se eliminaron KG_POR_INIX y LT_POR_INIX (envase INIX descontinuado)
+  - La manteca se vende por litro envasado: presentaciones 1lt y 0.5lt
+  - Los precios son por presentación, no por litro abstracto
+  - El mix litreada/cubeta NO se proyecta — se captura en cierre real
+  - Stock litreada y stock cubetas son inventarios independientes
 """
 
+from dataclasses import dataclass
+from typing import List
 
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from datetime import date
-from typing import Optional, List
 
 # ── CONSTANTES FÍSICAS ───────────────────────────────────────────────────────
-# Medidas con bascula. No modificar sin remedir.
+# Medidas con báscula tarada. No cambiar sin remedir.
 
-KG_GRASA_POR_CUBETA = 26.0 # 26 kg de grasa ~ 1 cubeta de 19 litros.
-LT_POR_CUBETA = 19.0 # Litros por cubeta estandar.
-DENSIDAD_MANTECA = 0.8752 # kg/litro, densidad de la manteca a 20°C. Fuente: https://www.engineeringtoolbox.com/fats-oils-densities-d_1698.html
+KG_GRASA_POR_CUBETA = 26.0      # relación de campo: 26 kg grasa → 1 cubeta
+LT_POR_CUBETA       = 19.0      # litros por cubeta estándar
+DENSIDAD_MANTECA    = 0.8752    # kg/lt — medido: 414g neto / 473ml referencia
+
+# Presentaciones litreada — volumen real del envase
+LT_POR_ENV_1LT      = 1.000     # litros por envase de 1 litro
+LT_POR_ENV_05LT     = 0.500     # litros por envase de 500ml
+
+# constante derivada — kg de manteca por kg de grasa
+# = (1/26) × 19 × 0.8752 = 0.6396
 REND_MANT_KG = round(LT_POR_CUBETA * DENSIDAD_MANTECA / KG_GRASA_POR_CUBETA, 6)
 
-# ── UMBRALES DEL PROCESO  ────────────────────────────────────────────────────────
-TEMP_HUMO = 140.0 # Temperatura del humo, en °C. Limite irreversible.
-REND_UMBRAL = 0.21 # >21% SOBRE rend_proceso, batch ok.
 
-# ── PROVEEDOR ───────────────────────────────────────────────────────
+# ── PROVEEDOR ────────────────────────────────────────────────────────────────
 
 @dataclass
 class Proveedor:
-    clave: str # "JC" | "El17" | "Bona" | "Mixto"
-    nombre: str # "Carnes JC"
-    costo_kg: float # $/kg - puede cambiar.
+    clave:    str
+    nombre:   str
+    costo_kg: float
 
-# ── BATCH ───────────────────────────────────────────────────────
+
+# ── BATCH ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class Batch:
-    # Identificación
-    id: int # 1-N dentro del dia.
-    fecha: str # "YYYY-MM-DD" 
-    operador: str # Nombre del chicharronero.  
-    t_inicio: Optional[str] = None # "HH:MM:SS"
-    t_fin: Optional[str] = None # "HH:MM:SS" 
-    notas: str = "" # Campo libre para anotaciones.
+    id:    int
+    fecha: str
+    hora:  str
+    proveedor: str
+    costo_kg:  float
+    temp_entrada: str   # "congelada" | "fria" | "ambiente"
+    composicion:  str   # "tejido" | "grasa" | "mixto"
+    operador:     str
+    kg_grasa: float     # ANTES de echar al cazo
+    kg_chi:   float     # DESPUÉS de sacar el chicharrón
+    observaciones: str = ""
 
-    #Proveedor
-    proveedor: str = "nd"
-    costo_kg: float = 0.0 # $/kg ese dia.
 
-    # ── Mediciones base (v1.0)  ────────────────────────────
-    kg_grasa: float = 0.0 # kg de grasa antes de echar al cazo.
-    kg_chi: float = 0.0 # kg de chicharron resultantes.
+# ── RESULTADO DE BATCH ───────────────────────────────────────────────────────
 
-    # ── materia prima extendida (v2.0) ────────────────────────────
-    kg_merma_cruda:    Optional[float] = None  # hueso+cartílago pesado ANTES del cazo
-    composicion:       str             = "nd"  # "limpia"|"carnuda"|"rojiza"|"muy_roja"
-    kg_descarte_rojo:  Optional[float] = None  # detectado en despacho, no en proceso
+@dataclass
+class ResultadoBatch:
+    batch_id: int
+    kg_mant:  float
+    lt_mant:  float
+    cubetas:  float
+    merma_kg: float
+    rend_chi_pct:  float
+    rend_mant_pct: float
+    merma_pct:     float
+    c_grasa:           float
+    c_batch:           float
+    c_chi_unit:        float   # aproximado sin fijos del día
+    c_mant_unit:       float   # aproximado sin fijos del día
+    costo_real_kg_chi: float   # c_grasa / kg_chi — métrica de proveedor
 
-    # ── insumos (v2.0) ────────────────────────────────────────────
-    kg_fondeo:         Optional[float] = None  # manteca inicial del batch anterior
-    ml_leche:          Optional[float] = None  # estandarizar el tanteo actual
-    kg_gas:            Optional[float] = None  # consumo gas LP
 
-    # ── checklist etapa 1 (v2.0) ──────────────────────────────────
-    sal_agregada:      bool            = False
-    leche_agregada:    bool            = False
+# ── RESULTADO DE DÍA ─────────────────────────────────────────────────────────
 
-    # ── telemetría térmica (v2.0) ─────────────────────────────────
-    temp_max:          Optional[float] = None  # °C máxima del batch
-    humo_detectado:    bool            = False
-    fuente_temp:       str             = "manual"  # "manual"|"esp32"
+@dataclass
+class ResultadoDia:
+    fecha:     str
+    n_batches: int
 
-    # ── calidad etapa 2 (v2.0) ────────────────────────────────────
-    espuma_intensidad: str             = "nd"  # "minima"|"moderada"|"intensa"|"nd"
+    # producción
+    kg_grasa_dia: float
+    kg_chi_dia:   float
+    kg_mant_dia:  float
+    lt_mant_dia:  float
+    cubetas_dia:  float     # cubetas potenciales de toda la manteca
+    merma_kg_dia: float
 
-    # ── telemetría temporal extendida (v2.0) ──────────────────────
-    t_flotacion:       Optional[str]   = None  # chicharrón flota → fin E1
-    t_espuma:          Optional[str]   = None  # aparece espuma → fin E2
-    t_130:             Optional[str]   = None  # referencia térmica
+    # rendimientos
+    rend_chi_pct:  float
+    rend_mant_pct: float
+    merma_pct:     float
+
+    # costos
+    c_grasa_dia:  float
+    c_total_dia:  float
+    c_chi_unit:   float
+    c_mant_unit:  float
+
+    # canales chicharrón (proyección por mix)
+    chi_pub_kg:  float
+    chi_may_kg:  float
+    ing_chi_pub: float
+    ing_chi_may: float
+    ing_chi:     float
+
+    # manteca — proyección simple: toda a cubeta (peor caso / referencia)
+    # el desglose real litreada/cubeta vive en CierreDia
+    ing_mant:     float
+
+    # resultado proyectado
+    ing_total: float
+    utilidad:  float
+
+    # métricas
+    margen_chi_pub_pct:  float
+    margen_chi_may_pct:  float
+    margen_mant_cub_pct: float
+    precio_min_chi:      float
+    precio_justo_chi:    float
+    precio_prem_chi:     float
+    util_mensual:        float
+
+
+# ── VENTA LITREADA ───────────────────────────────────────────────────────────
+
+@dataclass
+class VentaLitreada:
+    """
+    Una transacción de venta de manteca litreada.
+    lt_total se valida en cierre contra litros disponibles del día.
+    """
+    env_1lt:  int     # envases de 1 litro vendidos
+    env_05lt: int     # envases de 500ml vendidos
+    lt_total: float   # env_1lt×1.0 + env_05lt×0.5  (calculado y validado)
+
+
+# ── CIERRE DEL DÍA ───────────────────────────────────────────────────────────
+
+@dataclass
+class VentaCubeta:
+    cantidad: float
+    precio:   float
+
+
+@dataclass
+class CierreDia:
+    fecha: str
+
+    # chicharrón
+    chi_pub_kg: float
+    chi_may_kg: float
+
+    # manteca litreada — inventario independiente
+    ventas_litreada:   List[VentaLitreada]
+    stock_litreada_lt: float    # litros en stock al cierre del día
+
+    # manteca cubetas — inventario independiente
+    ventas_cubeta: List[VentaCubeta]
+    stock_cubetas: float        # cubetas en bodega al cierre
+
+    observaciones: str = ""
+
+
+# ── CONFIG ───────────────────────────────────────────────────────────────────
+
+@dataclass
+class Config:
+    # distribución de costo
+    alpha: float = 0.70
+    beta:  float = 0.30
+
+    # costos laborales
+    destajo_kg:      float = 1.50
+    diario_empleado: float = 350.0
+
+    # costos operativos fijos
+    leche_dia:       float = 80.0
+    costo_env_1lt:   float = 3.50    # costo envase 1lt vacío
+    costo_env_05lt:  float = 2.00    # costo envase 500ml vacío
+
+    # gas — capturado en cierre, NO aquí
+
+    # precios — chicharrón
+    precio_chi_pub:  float = 230.0
+    precio_chi_may:  float = 180.0
+
+    # precios — manteca
+    precio_mant_cub:  float = 500.0  # $/cubeta 19lt
+    precio_mant_lt1:  float = 35.0   # $/envase 1lt
+    precio_mant_lt05: float = 20.0   # $/envase 500ml
+
+    # mix chicharrón para proyección en analisis/simulador
+    mix_chi_pub_pct: float = 30.0
+    # mix manteca — eliminado, se captura en cierre real
 
     def __post_init__(self):
-        # Campos sin default que pueden llegar vacios.
-        if not self.fecha:
-            self.fecha = date.today().isoformat()
-
-        # Rangos fisicos basicos.
-        if self.kg_grasa < 0.0:
-            raise ValueError(f"kg_grasa negativo: {self.kg_grasa}")
-        if self.kg_chi < 0.0:
-            raise ValueError(f"kg_chi negativo: {self.kg_chi}")
-        if self.kg_chi > self.kg_grasa and self.kg_grasa > 0.0:
-            raise ValueError(f"kg_chi ({self.kg_chi}) > kg_grasa ({self.kg_grasa}) - imposible"
-            )
-        if self.temp_max is not None and self.temp_max >= TEMP_HUMO:
-            self.humo_detectado = True
-
-        # Normalizar strings.
-        self.composicion = self.composicion.lower()
-        self.espuma_intensidad = self.espuma_intensidad.lower()
-        self.fuente_temp = self.fuente_temp.lower()
-         
-    
-
-    # ── propiedades derivadas ─────────────────────────────────────
-
-    @property
-    def kg_grasa_cazo(self) -> float:
-        """Grasa neta que entró al cazo — base para rend_proceso."""
-        return self.kg_grasa - (self.kg_merma_cruda or 0.0)
-
-    @property
-    def etapa1_completa(self) -> bool:
-        """Checklist mínimo de Etapa 1."""
-        return self.sal_agregada and self.leche_agregada
-
-    @property
-    def tiene_telemetria(self) -> bool:
-        """True si hay al menos un timestamp registrado."""
-        return any([self.t_inicio, self.t_flotacion, self.t_espuma, self.t_fin])
-
-    @property
-    def humo_riesgo(self) -> bool:
-        """Zona de riesgo antes del límite irreversible."""
-        if self.humo_detectado:
-            return True
-        if self.temp_max is not None and self.temp_max >= 135.0:
-            return True
-        return False
-
-    
+        self.beta = round(1.0 - self.alpha, 10)
