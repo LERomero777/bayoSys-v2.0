@@ -12,11 +12,11 @@ from config import (
     fecha_hoy
 )
 from calcular import calcular_dia
-from registro import menu_registro
+from registro import menu_registro, registrar_batch
 from cierre import menu_cierre, cargar_cierre
 from analisis import menu_analisis
 from tui import iniciar_tui
-from pos_db import init_db
+from pos_db import init_db, calcular_corte, guardar_corte
 
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
@@ -69,6 +69,70 @@ def _estado_hoy() -> str:
         estado += f"  costo:${rd.c_total_dia:,.0f}  [sin cierre]"
 
     return estado
+
+
+# ── BATCH ACTIVO ──────────────────────────────────────────────────────────────
+# Persiste el batch_id activo del POS en un archivo simple
+# para sobrevivir reinicios del sistema
+
+def _ruta_batch_activo() -> str:
+    import os
+    base = os.path.join(os.path.expanduser("~"), "bayosys", "data")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "batch_activo.txt")
+
+def get_batch_activo() -> int | None:
+    """Retorna el batch_id activo del POS, o None si no hay ninguno."""
+    ruta = _ruta_batch_activo()
+    if not os.path.exists(ruta):
+        return None
+    try:
+        with open(ruta) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+def set_batch_activo(batch_id: int | None):
+    """Guarda o limpia el batch_id activo."""
+    ruta = _ruta_batch_activo()
+    if batch_id is None:
+        if os.path.exists(ruta):
+            os.remove(ruta)
+    else:
+        with open(ruta, "w") as f:
+            f.write(str(batch_id))
+
+def hay_corte_pendiente(batch_id: int) -> bool:
+    """Verifica si el batch tiene ventas sin corte registrado."""
+    corte = calcular_corte(batch_id=batch_id)
+    return corte["n_tickets"] > 0
+
+def hacer_corte_entre_batches(batch_id: int):
+    """Muestra resumen y guarda el corte del batch anterior."""
+    print()
+    _sep("─")
+    print(f"  CORTE DE CAJA — batch #{batch_id}")
+    _sep("─")
+    corte = calcular_corte(batch_id=batch_id)
+    print(f"  tickets del turno : {corte['n_tickets']}")
+    print(f"  ventas efectivo   : ${corte['ventas_efectivo']:,.2f}")
+    print(f"  ventas transfer   : ${corte['ventas_transfer']:,.2f}")
+    print(f"  ventas tarjeta    : ${corte['ventas_tarjeta']:,.2f}")
+    print(f"  ─────────────────────────────────────")
+    print(f"  TOTAL VENTAS      : ${corte['total_ventas']:,.2f}")
+    print(f"  gastos del turno  : ${corte['total_gastos']:,.2f}")
+    print(f"  ─────────────────────────────────────")
+    print(f"  NETO              : ${corte['neto']:,.2f}")
+    print(f"  fondo de caja     : ${corte['fondo_caja']:,.2f}")
+    print(f"  A ENTREGAR        : ${corte['a_entregar']:,.2f}")
+    print()
+    if _confirmar("  ¿confirmar corte?"):
+        corte_id = guardar_corte(batch_id, corte)
+        print(f"\n  ✓ corte #{corte_id} guardado\n")
+        return True
+    else:
+        print("\n  ! corte no confirmado — las ventas siguen en el sistema\n")
+        return False
 
 
 # ── MENÚ DE CONFIGURACIÓN ────────────────────────────────────────────────────
@@ -151,7 +215,6 @@ def menu_config():
             print(f"  ✓ alpha={cfg.alpha*100:.0f}%  beta={cfg.beta*100:.0f}%")
 
         elif op == "6":
-            # sincronizar precios de Config → pos.db
             try:
                 from pos_db import actualizar_precio
                 actualizar_precio("CHI",  cfg.precio_chi_pub)
@@ -166,21 +229,71 @@ def menu_config():
             break
 
 
+# ── FLUJO REGISTRO BATCH CON CORTE ───────────────────────────────────────────
+
+def flujo_registrar_batch():
+    """
+    Registra un batch nuevo.
+    Si hay un batch activo con ventas sin corte, solicita el corte primero.
+    Al guardar el batch, pregunta si abrir el POS para ese batch.
+    """
+    batch_activo = get_batch_activo()
+
+    # si hay batch activo con ventas pendientes de corte
+    if batch_activo and hay_corte_pendiente(batch_activo):
+        print()
+        _sep("─")
+        print(f"  ! hay ventas sin corte del batch #{batch_activo}")
+        print(f"    debes hacer el corte antes de registrar un nuevo batch")
+        _sep("─")
+        hacer_corte_entre_batches(batch_activo)
+        set_batch_activo(None)
+
+    # registrar el batch nuevo
+    batch = registrar_batch()
+
+    if batch is None:
+        return  # batch descartado
+
+    # preguntar si abrir el POS para este batch
+    print()
+    if _confirmar(f"  ¿abrir el POS para el batch #{batch.id}?"):
+        set_batch_activo(batch.id)
+        _abrir_pos(batch.id)
+    else:
+        print(f"  POS no abierto — puedes abrirlo desde [2] del menú principal\n")
+
+
+# ── ABRIR POS ─────────────────────────────────────────────────────────────────
+
+def _abrir_pos(batch_id: int):
+    """Abre el POS curses para el batch indicado."""
+    try:
+        from pos_tui import iniciar_pos_tui
+        set_batch_activo(batch_id)
+        iniciar_pos_tui(batch_id=batch_id, operador="Luis")
+    except Exception as e:
+        print(f"\n  ! error al abrir el POS: {e}\n")
+        input("  Enter para continuar...")
+
+
 # ── MENÚ PRINCIPAL ───────────────────────────────────────────────────────────
 
 def main():
-    # inicializar SQLite del POS al arrancar
     init_db()
 
     while True:
         _limpiar()
-        fecha  = fecha_hoy()
-        estado = _estado_hoy()
+        fecha       = fecha_hoy()
+        estado      = _estado_hoy()
+        batch_activo = get_batch_activo()
 
         _sep()
         print("  bayoSys · Productos El Bayo")
         _sep("─")
         print(f"  {fecha}  |  {estado}")
+        if batch_activo:
+            print(f"  POS activo: batch #{batch_activo}")
         _sep()
         print()
         print("  [1] registrar batch")
@@ -197,13 +310,36 @@ def main():
 
         if op == "1":
             _limpiar()
-            menu_registro()
+            flujo_registrar_batch()
 
         elif op == "2":
             _limpiar()
-            # pos_tui se construye en siguiente iteración
-            print("\n  POS en construcción — próxima sesión\n")
-            input("  Enter para continuar...")
+            batch_activo = get_batch_activo()
+            if batch_activo:
+                _abrir_pos(batch_activo)
+            else:
+                # no hay batch activo — preguntar cuál usar
+                fecha   = fecha_hoy()
+                batches = cargar_batches(fecha)
+                if not batches:
+                    print("\n  ! no hay batches registrados hoy")
+                    print("  registra un batch primero\n")
+                    input("  Enter para continuar...")
+                else:
+                    print("\n  batches de hoy:")
+                    for b in batches:
+                        print(f"  [{b.id}] batch #{b.id}  {b.hora}  {b.proveedor}  {b.kg_grasa}kg")
+                    print()
+                    try:
+                        bid = int(input("  ¿qué batch usar para el POS? ").strip())
+                        if bid in [b.id for b in batches]:
+                            _abrir_pos(bid)
+                        else:
+                            print("  ! batch no encontrado")
+                            input("  Enter para continuar...")
+                    except ValueError:
+                        print("  ! ingresa un número")
+                        input("  Enter para continuar...")
 
         elif op == "3":
             _limpiar()
