@@ -33,6 +33,14 @@ from pos import (
 from pos_db import get_ticket_items, anular_ticket
 from config import fecha_hoy
 
+try:
+    from pos_ticket import imprimir_ticket_fisico, ErrorImpresora
+    IMPRESORA_DISPONIBLE = True
+except ImportError:
+    IMPRESORA_DISPONIBLE = False
+    class ErrorImpresora(Exception):
+        pass
+
 
 # ── COLORES ──────────────────────────────────────────────────────────────────
 
@@ -314,19 +322,31 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         resultado = cobrar(sesion, pagos)
         ticket_id = resultado["ticket_id"]
 
-        # ofrecer imprimir
+        # respaldo en texto plano — siempre se genera, pase lo que pase con la impresora
+        txt = imprimir_ticket(ticket_id)
+        ruta = os.path.expanduser(f"~/bayosys/data/ticket_{ticket_id:04d}.txt")
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        with open(ruta, "w") as f:
+            f.write(txt)
+
+        # ofrecer imprimir físico
         sadd(stdscr, my + 8, mx + 2,
              f"Ticket #{ticket_id:04d}  [P]imprimir [Enter]", C_GREEN() | curses.A_BOLD)
         stdscr.refresh()
         key = stdscr.getch()
+
         if key in (ord("p"), ord("P")):
-            txt = imprimir_ticket(ticket_id)
-            # guardar en archivo para impresión
-            ruta = os.path.expanduser(f"~/bayosys/data/ticket_{ticket_id:04d}.txt")
-            os.makedirs(os.path.dirname(ruta), exist_ok=True)
-            with open(ruta, "w") as f:
-                f.write(txt)
-            return f"ticket #{ticket_id:04d} guardado en {ruta}"
+            if not IMPRESORA_DISPONIBLE:
+                return (f"ticket #{ticket_id:04d} cobrado — "
+                        f"impresora no disponible (escpos no instalado), respaldo en {ruta}")
+            try:
+                imprimir_ticket_fisico(ticket_id, pagos, resultado["cambio"])
+                return f"ticket #{ticket_id:04d} cobrado e impreso OK"
+            except ErrorImpresora as e:
+                # el ticket YA está cobrado en SQLite — el fallo de impresora
+                # no debe revertir nada, solo se avisa al operador
+                return (f"ticket #{ticket_id:04d} cobrado, pero NO se imprimió "
+                        f"({e}) — respaldo en {ruta}")
 
         return f"ticket #{ticket_id:04d} cobrado OK — cambio ${resultado['cambio']:.2f}"
 
