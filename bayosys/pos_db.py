@@ -238,8 +238,8 @@ def crear_ticket(batch_id: int, operador: str,
             """, (ticket_id, item["sku"], item["descripcion"],
                   item["cantidad"], item["precio_unit"], item["subtotal"]))
 
-            # descontar inventario si no es CHI ni LIB
-            if item["sku"] not in ("CHI", "LIB") and item["sku"] != "":
+            # descontar inventario solo si no es artículo libre (LIB). Modificado para permitir que se descuente del POS el stock del chicharron vendido al publico y mayoreo
+            if item["sku"] != "LIB":
                 conn.execute("""
                     UPDATE inventario SET stock = stock - ? WHERE sku = ?
                 """, (item["cantidad"], item["sku"]))
