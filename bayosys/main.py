@@ -17,7 +17,7 @@ from cierre import menu_cierre, cargar_cierre
 from analisis import menu_analisis
 from tui import iniciar_tui
 from pos_db import init_db, calcular_corte, guardar_corte
-
+from guardian import verificar_integridad
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ def _ruta_batch_activo() -> str:
     os.makedirs(base, exist_ok=True)
     return os.path.join(base, "batch_activo.txt")
 
-def get_batch_activo() -> int | None:
+def get_batch_activo() -> str | None:
     """Retorna el batch_id activo del POS, o None si no hay ninguno."""
     ruta = _ruta_batch_activo()
     if not os.path.exists(ruta):
@@ -92,7 +92,7 @@ def get_batch_activo() -> int | None:
     except Exception:
         return None
 
-def set_batch_activo(batch_id: int | None):
+def set_batch_activo(batch_id: str | None):
     """Guarda o limpia el batch_id activo."""
     ruta = _ruta_batch_activo()
     if batch_id is None:
@@ -102,10 +102,16 @@ def set_batch_activo(batch_id: int | None):
         with open(ruta, "w") as f:
             f.write(str(batch_id))
 
-def hay_corte_pendiente(batch_id: int) -> bool:
-    """Verifica si el batch tiene ventas sin corte registrado."""
+def hay_corte_pendiente(batch_id: str) -> bool:
+    """
+    True si el batch tiene ventas registradas Y no tiene corte guardado.
+    Evita falso positivo cuando ya se cortó pero hubo más ventas después.
+    """
+    from pos_db import tiene_corte_guardado
     corte = calcular_corte(batch_id=batch_id)
-    return corte["n_tickets"] > 0
+    if corte["n_tickets"] == 0:
+        return False
+    return not tiene_corte_guardado(batch_id)
 
 def hacer_corte_entre_batches(batch_id: int):
     """Muestra resumen y guarda el corte del batch anterior."""
@@ -255,7 +261,22 @@ def flujo_registrar_batch():
     if batch is None:
         return  # batch descartado
 
+    # cargar kg_chi del batch al inventario del POS
+    try:
+        from pos_db import actualizar_stock
+        actualizar_stock(
+            sku        = "CHI",
+            delta      = batch.kg_chi,
+            tipo       = "produccion",
+            referencia = f"batch#{batch.id}",
+            nota       = f"{batch.kg_chi}kg — {batch.proveedor}"
+        )
+        print(f"  ✓ {batch.kg_chi}kg de chicharrón cargados al inventario POS")
+    except Exception as e:
+        print(f"  ! error cargando stock CHI: {e}")
+
     # preguntar si abrir el POS para este batch
+   
     print()
     if _confirmar(f"  ¿abrir el POS para el batch #{batch.id}?"):
         set_batch_activo(batch.id)
@@ -281,8 +302,10 @@ def _abrir_pos(batch_id: int):
 
 def main():
     init_db()
+    verificar_integridad()   # ← audita días anteriores antes del menú
 
     while True:
+
         _limpiar()
         fecha       = fecha_hoy()
         estado      = _estado_hoy()

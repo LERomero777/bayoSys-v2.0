@@ -67,7 +67,7 @@ def registrar_batch():
     batch_id  = siguiente_batch_id(fecha)
     hora      = datetime.now().strftime("%H:%M")
 
-    _titulo(f"REGISTRO DE BATCH — {fecha}  |  batch #{batch_id}  |  {hora}")
+    _titulo(f"REGISTRO DE BATCH — batch {batch_id}  |  {hora}")
 
     # ── proveedor ────────────────────────────────────────────────────
     print("\n  PROVEEDOR")

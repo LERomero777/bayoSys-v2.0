@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     fecha               TEXT NOT NULL,
     hora                TEXT NOT NULL,
-    batch_id            INTEGER,        -- batch activo al momento de la venta
+    batch_id            TEXT,        -- batch activo formato AAAAMMDD-N.
     operador            TEXT NOT NULL DEFAULT 'Luis',
     pago_efectivo       REAL NOT NULL DEFAULT 0,
     pago_transfer       REAL NOT NULL DEFAULT 0,
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS gastos (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     fecha       TEXT NOT NULL,
     hora        TEXT NOT NULL,
-    batch_id    INTEGER,
+    batch_id    TEXT,  -- batch activo formato AAAAMMDD-N.
     tipo        TEXT NOT NULL,  -- 'gas' | 'leche' | 'gral'
     descripcion TEXT,
     monto       REAL NOT NULL
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS cortes (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     fecha               TEXT NOT NULL,
     hora                TEXT NOT NULL,
-    batch_id            INTEGER,
+    batch_id            TEXT,
     ventas_efectivo     REAL NOT NULL DEFAULT 0,
     ventas_transfer     REAL NOT NULL DEFAULT 0,
     ventas_tarjeta      REAL NOT NULL DEFAULT 0,
@@ -264,7 +264,7 @@ def anular_ticket(ticket_id: int):
         )
         ahora = datetime.now()
         for item in items:
-            if item["sku"] not in ("CHI", "LIB"):
+            if item["sku"] != "LIB":  # no revertir stock de artículo libre
                 conn.execute(
                     "UPDATE inventario SET stock = stock + ? WHERE sku = ?",
                     (item["cantidad"], item["sku"])
@@ -334,7 +334,7 @@ def get_gastos_batch(batch_id: int) -> list:
 
 # ── CORTES ────────────────────────────────────────────────────────────────────
 
-def calcular_corte(batch_id: int = None, fecha: str = None) -> dict:
+def calcular_corte(batch_id: str = None, fecha: str = None) -> dict:
     """
     Calcula los totales para un corte de caja.
     Si batch_id: filtra solo ese batch.
@@ -385,7 +385,7 @@ def calcular_corte(batch_id: int = None, fecha: str = None) -> dict:
         tickets          = tickets,
     )
 
-def guardar_corte(batch_id: int, corte: dict, nota: str = "") -> int:
+def guardar_corte(batch_id: str, corte: dict, nota: str = "") -> int:
     ahora = datetime.now()
     with get_conn() as conn:
         cur = conn.execute("""
@@ -413,6 +413,18 @@ def get_cortes(fecha: str = None) -> list:
             "SELECT * FROM cortes WHERE fecha = ? ORDER BY id",
             (fecha,)
         ).fetchall()
+
+def tiene_corte_guardado(batch_id: str) -> bool:
+    """
+    Retorna True si ya existe al menos un corte guardado para el batch_id.
+    Usado por guardian.py y hay_corte_pendiente() en main.py.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as n FROM cortes WHERE batch_id = ?",
+            (batch_id,)
+        ).fetchone()
+        return row["n"] > 0
 
 
 # ── RESUMEN VENTAS DÍA (para cierre.py) ──────────────────────────────────────

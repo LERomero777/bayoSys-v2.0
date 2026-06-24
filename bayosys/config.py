@@ -153,9 +153,23 @@ def fechas_con_registro() -> List[str]:
     return [f.replace(".json", "") for f in archivos if f.endswith(".json")]
 
 
-def siguiente_batch_id(fecha: str) -> int:
-    """Devuelve el próximo id de batch para un día dado."""
+def siguiente_batch_id(fecha: str) -> str:
+    """
+    Devuelve el próximo id de batch en formato AAAAMMDD-N.
+    Ejemplo: '20261219-1', '20261219-2', ...
+    Único globalmente — no colisiona entre días.
+    """
     batches = cargar_batches(fecha)
+    fecha_compact = fecha.replace("-", "")   # '2026-12-19' → '20261219'
     if not batches:
-        return 1
-    return max(b.id for b in batches) + 1
+        return f"{fecha_compact}-1"
+    # extraer el N del último batch del día
+    ns = []
+    for b in batches:
+        try:
+            n = int(b.id.split("-")[-1])
+            ns.append(n)
+        except (ValueError, AttributeError):
+            pass
+    siguiente_n = max(ns) + 1 if ns else 1
+    return f"{fecha_compact}-{siguiente_n}"
