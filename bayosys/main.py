@@ -349,21 +349,26 @@ def main():
                     print("  registra un batch primero\n")
                     input("  Enter para continuar...")
                 else:
+                    cfg = cargar_config()
+                    from calcular import calcular_batch
                     print("\n  batches de hoy:")
-                    for b in batches:
-                        print(f"  [{b.id}] batch #{b.id}  {b.hora}  {b.proveedor}  {b.kg_grasa}kg")
+                    for i, b in enumerate(batches, 1):
+                        r = calcular_batch(b, cfg, len(batches))
+                        print(f"  [{i}] {b.id}  {b.hora}  {b.proveedor}")
+                        print(f"       chi:{b.kg_chi}kg  "
+                              f"mant:{r.kg_mant:.2f}kg/{r.lt_mant:.2f}lt  "
+                              f"rend:{r.rend_chi_pct:.1f}%")
                     print()
                     try:
-                        bid = int(input("  ¿qué batch usar para el POS? ").strip())
-                        if bid in [b.id for b in batches]:
-                            _abrir_pos(bid)
+                        idx = int(input("  ¿qué batch? [número]: ").strip())
+                        if 1 <= idx <= len(batches):
+                            _abrir_pos(batches[idx - 1].id)
                         else:
-                            print("  ! batch no encontrado")
+                            print("  ! opción fuera de rango")
                             input("  Enter para continuar...")
                     except ValueError:
                         print("  ! ingresa un número")
                         input("  Enter para continuar...")
-
         elif op == "3":
             _limpiar()
             menu_cierre()

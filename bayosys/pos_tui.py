@@ -181,8 +181,15 @@ def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, msg: str = ""):
     for tecla, sku, nombre, variable in MENU_PRODUCTOS:
         stock = inv_dict.get(sku, {}).get("stock", 0)
         if sku == "CHI":
-            stock_str = "∞"
-            color     = C_NORM()
+            if stock <= 0:
+                stock_str = "sin stock"
+                color     = C_RED()
+            elif stock <= 5:
+                stock_str = f"{stock:.3f} kg"
+                color     = C_YELLOW()
+            else:
+                stock_str = f"{stock:.3f} kg"
+                color     = C_GREEN()
         elif sku in ("LIB",):
             stock_str = ""
             color     = C_CYAN()
@@ -271,84 +278,159 @@ def draw_panel_ticket(win, sesion: SesionPOS):
 # ── FLUJO COBRO ───────────────────────────────────────────────────────────────
 
 def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
-    """Pantalla modal de cobro — selecciona forma de pago."""
-    h, w = stdscr.getmaxyx()
+    """
+    Modal de cobro inteligente.
+    1. Pregunta método de pago
+    2. Si el monto cubre el total → cambio y cobra
+    3. Si no cubre → ofrece segundo método
+    4. Nunca pide métodos innecesarios
+    """
+    h, w  = stdscr.getmaxyx()
     total = sesion.ticket.total
+    my    = h // 2 - 7
+    mx    = w // 2 - 18
 
-    my = h // 2 - 6
-    mx = w // 2 - 18
-
-    # dibujar caja modal
-    for i in range(14):
-        sadd(stdscr, my + i, mx, " " * 36)
-
-    sadd(stdscr, my,     mx + 1, f"┌{'─'*34}┐", C_CYAN())
-    sadd(stdscr, my + 1, mx + 1, f"│ COBRAR                           │", C_CYAN())
-    sadd(stdscr, my + 2, mx + 1, f"│ TOTAL: ${total:>24,.2f} │", C_GREEN() | curses.A_BOLD)
-    sadd(stdscr, my + 3, mx + 1, f"├{'─'*34}┤", C_CYAN())
-    sadd(stdscr, my + 4, mx + 1, f"│                                  │", C_CYAN())
-    sadd(stdscr, my + 5, mx + 1, f"│                                  │", C_CYAN())
-    sadd(stdscr, my + 6, mx + 1, f"│                                  │", C_CYAN())
-    sadd(stdscr, my + 7, mx + 1, f"├{'─'*34}┤", C_CYAN())
-    sadd(stdscr, my + 8, mx + 1, f"│                                  │", C_CYAN())
-    sadd(stdscr, my + 9, mx + 1, f"└{'─'*34}┘", C_CYAN())
-
-    pagos = {"efectivo": 0.0, "transfer": 0.0, "tarjeta": 0.0}
-
-    ef = pedir_float_modal(stdscr, "Efectivo  $", my + 4, mx + 3)
-    pagos["efectivo"] = ef
-    tr = pedir_float_modal(stdscr, "Transfer  $", my + 5, mx + 3)
-    pagos["transfer"] = tr
-    ta = pedir_float_modal(stdscr, "Tarjeta   $", my + 6, mx + 3)
-    pagos["tarjeta"] = ta
-
-    total_pagado = ef + tr + ta
-    cambio = total_pagado - total
-
-    if total_pagado < total - 0.01:
-        sadd(stdscr, my + 8, mx + 2,
-             f"FALTA ${total - total_pagado:.2f}  [Enter=retry]", C_RED() | curses.A_BOLD)
+    def _dibujar_caja():
+        for i in range(16):
+            sadd(stdscr, my + i, mx, " " * 38)
+        sadd(stdscr, my,      mx+1, f"┌{'─'*36}┐", C_CYAN())
+        sadd(stdscr, my + 1,  mx+1, f"│ COBRAR{' '*29}│", C_CYAN())
+        sadd(stdscr, my + 2,  mx+1, f"│ TOTAL: ${total:>26,.2f} │",
+             C_GREEN() | curses.A_BOLD)
+        sadd(stdscr, my + 3,  mx+1, f"├{'─'*36}┤", C_CYAN())
+        sadd(stdscr, my + 4,  mx+1, f"│ MÉTODO DE PAGO:{' '*20}│", C_CYAN())
+        sadd(stdscr, my + 5,  mx+1, f"│  [1] Efectivo{' '*22}│", C_NORM())
+        sadd(stdscr, my + 6,  mx+1, f"│  [2] Transferencia{' '*17}│", C_NORM())
+        sadd(stdscr, my + 7,  mx+1, f"│  [3] Tarjeta{' '*23}│", C_NORM())
+        sadd(stdscr, my + 8,  mx+1, f"│  [Esc] Cancelar{' '*19}│", C_NORM())
+        sadd(stdscr, my + 9,  mx+1, f"├{'─'*36}┤", C_CYAN())
+        sadd(stdscr, my + 10, mx+1, f"│{' '*36}│", C_CYAN())
+        sadd(stdscr, my + 11, mx+1, f"│{' '*36}│", C_CYAN())
+        sadd(stdscr, my + 12, mx+1, f"│{' '*36}│", C_CYAN())
+        sadd(stdscr, my + 13, mx+1, f"├{'─'*36}┤", C_CYAN())
+        sadd(stdscr, my + 14, mx+1, f"│{' '*36}│", C_CYAN())
+        sadd(stdscr, my + 15, mx+1, f"└{'─'*36}┘", C_CYAN())
         stdscr.refresh()
-        stdscr.getch()
-        return "retry"
 
-    if cambio > 0:
-        sadd(stdscr, my + 8, mx + 2,
-             f"CAMBIO: ${cambio:.2f}  [Enter]", C_YELLOW() | curses.A_BOLD)
+    METODOS = {ord("1"): "efectivo", ord("2"): "transfer", ord("3"): "tarjeta"}
+    LABELS  = {"efectivo": "Efectivo  ", "transfer": "Transfer  ", "tarjeta": "Tarjeta   "}
+
+    pagos   = {"efectivo": 0.0, "transfer": 0.0, "tarjeta": 0.0}
+
+    # ── PASO 1: elegir método principal ──────────────────────────────
+    _dibujar_caja()
+    while True:
+        key = stdscr.getch()
+        if key == 27:
+            return ""   # cancelar
+        if key in METODOS:
+            metodo1 = METODOS[key]
+            break
+
+    # ── PASO 2: ingresar monto del método principal ───────────────────
+    _dibujar_caja()
+    sadd(stdscr, my + 10, mx + 2,
+         f"  {LABELS[metodo1]}$", C_CYAN() | curses.A_BOLD)
+    stdscr.refresh()
+    monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
+
+    if monto1 <= 0:
+        return ""
+
+    pagos[metodo1] = monto1
+    restante = round(total - monto1, 2)
+
+    # ── PASO 3: ¿cubre el total? ──────────────────────────────────────
+    if restante <= 0:
+        # cubre — mostrar cambio si aplica
+        cambio = abs(restante)
+        if cambio > 0:
+            sadd(stdscr, my + 11, mx + 2,
+                 f"  CAMBIO: ${cambio:>8.2f}          ",
+                 C_YELLOW() | curses.A_BOLD)
+        else:
+            sadd(stdscr, my + 11, mx + 2,
+                 f"  Exacto ✓                    ", C_GREEN())
+        sadd(stdscr, my + 14, mx + 2,
+             "  [Enter] cobrar  [Esc] cancelar", C_NORM())
         stdscr.refresh()
-        stdscr.getch()
+        key = stdscr.getch()
+        if key == 27:
+            return ""
 
+    else:
+        # no cubre — pedir segundo método
+        sadd(stdscr, my + 11, mx + 2,
+             f"  Falta: ${restante:>8.2f}              ", C_RED() | curses.A_BOLD)
+        sadd(stdscr, my + 12, mx + 2,
+             "  2do método: [1]Ef [2]Tr [3]Ta [Esc]", C_CYAN())
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == 27:
+            return ""
+
+        if key in METODOS:
+            metodo2 = METODOS[key]
+            if metodo2 == metodo1:
+                metodo2 = "efectivo" if metodo1 != "efectivo" else "transfer"
+            sadd(stdscr, my + 12, mx + 2,
+                 f"  {LABELS[metodo2]}$               ", C_CYAN())
+            stdscr.refresh()
+            monto2 = pedir_float_modal(stdscr,
+                                        f"  {LABELS[metodo2]}$", my + 12, mx + 2)
+            pagos[metodo2] = monto2
+            total_pagado   = monto1 + monto2
+            if total_pagado < total - 0.01:
+                sadd(stdscr, my + 14, mx + 2,
+                     f"  FALTA ${total-total_pagado:.2f} — [Enter]retry",
+                     C_RED() | curses.A_BOLD)
+                stdscr.refresh()
+                stdscr.getch()
+                return "retry"
+            cambio = round(total_pagado - total, 2)
+            if cambio > 0:
+                sadd(stdscr, my + 13, mx + 2,
+                     f"  CAMBIO: ${cambio:.2f}          ",
+                     C_YELLOW() | curses.A_BOLD)
+            sadd(stdscr, my + 14, mx + 2,
+                 "  [Enter] cobrar  [Esc] cancelar  ", C_NORM())
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == 27:
+                return ""
+
+    # ── PASO 4: cobrar ────────────────────────────────────────────────
     try:
-        resultado = cobrar(sesion, pagos)
-        ticket_id = resultado["ticket_id"]
+        resultado  = cobrar(sesion, pagos)
+        ticket_id  = resultado["ticket_id"]
+        cambio     = resultado["cambio"]
 
-        # respaldo en texto plano — siempre se genera, pase lo que pase con la impresora
-        txt = imprimir_ticket(ticket_id)
+        # respaldo texto siempre
+        txt  = imprimir_ticket(ticket_id)
         ruta = os.path.expanduser(f"~/bayosys/data/ticket_{ticket_id:04d}.txt")
         os.makedirs(os.path.dirname(ruta), exist_ok=True)
         with open(ruta, "w") as f:
             f.write(txt)
 
-        # ofrecer imprimir físico
-        sadd(stdscr, my + 8, mx + 2,
-             f"Ticket #{ticket_id:04d}  [P]imprimir [Enter]", C_GREEN() | curses.A_BOLD)
+        sadd(stdscr, my + 14, mx + 2,
+             f"  Ticket #{ticket_id:04d}  [P]imprimir [Enter]",
+             C_GREEN() | curses.A_BOLD)
         stdscr.refresh()
         key = stdscr.getch()
 
         if key in (ord("p"), ord("P")):
             if not IMPRESORA_DISPONIBLE:
                 return (f"ticket #{ticket_id:04d} cobrado — "
-                        f"impresora no disponible (escpos no instalado), respaldo en {ruta}")
+                        f"impresora no disponible, respaldo en {ruta}")
             try:
-                imprimir_ticket_fisico(ticket_id, pagos, resultado["cambio"])
+                imprimir_ticket_fisico(ticket_id, pagos, cambio)
                 return f"ticket #{ticket_id:04d} cobrado e impreso OK"
             except ErrorImpresora as e:
-                # el ticket YA está cobrado en SQLite — el fallo de impresora
-                # no debe revertir nada, solo se avisa al operador
-                return (f"ticket #{ticket_id:04d} cobrado, pero NO se imprimió "
+                return (f"ticket #{ticket_id:04d} cobrado, NO imprimió "
                         f"({e}) — respaldo en {ruta}")
 
-        return f"ticket #{ticket_id:04d} cobrado OK — cambio ${resultado['cambio']:.2f}"
+        return f"ticket #{ticket_id:04d} cobrado OK — cambio ${cambio:.2f}"
 
     except ErrorPOS as e:
         return f"ERROR: {e}"
