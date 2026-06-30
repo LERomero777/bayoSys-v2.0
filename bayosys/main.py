@@ -88,7 +88,7 @@ def get_batch_activo() -> str | None:
         return None
     try:
         with open(ruta) as f:
-            return int(f.read().strip())
+            return f.read().strip()
     except Exception:
         return None
 
