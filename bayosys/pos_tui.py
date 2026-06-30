@@ -1,7 +1,12 @@
 """
 pos_tui.py — bayoSys · Productos El Bayo
 Interfaz curses del POS. Pantalla dividida estilo htop.
-Navega con números, flechas y teclas directas.
+
+CAMBIOS:
+  - MENU_PRODUCTOS eliminado — panel se construye desde get_menu_pos() en DB
+  - Handler de teclas dinámico por tipo_venta del SKU
+  - Agregar producto nuevo al catálogo → aparece automáticamente en el POS
+  - El resto del archivo no cambia: flujo_cobro, corte, historial, inventario
 
 Layout:
   ┌─ PRODUCTOS ──────┬─ TICKET ACTUAL ──────────────────┐
@@ -10,7 +15,7 @@ Layout:
   │ [3] Manteca ½lt  │  ──────────────────────────────  │
   │ [4] Chorizo      │  TOTAL               $357.50      │
   │ [5] Cubeta       │                                   │
-  │ [6] + Artículo   │                                   │
+  │ [N] + Artículo   │                                   │
   ├──────────────────┤                                   │
   │ [G] Gasto        │                                   │
   │ [A] Abrir cubeta │                                   │
@@ -18,7 +23,7 @@ Layout:
   │ [C] Corte        │                                   │
   │ [Q] Salir        │                                   │
   └──────────────────┴───────────────────────────────────┘
-  [ batch#2 | tickets:3 | ventas:$1,240 | neto:$890 ]
+  [ batch#20260630-1 | tickets:3 | ventas:$1,240 | neto:$890 ]
 """
 
 import curses
@@ -30,7 +35,7 @@ from pos import (
     carga_manual_stock, get_estado_inventario, get_resumen_turno,
     get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS
 )
-from pos_db import get_ticket_items, anular_ticket
+from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy
 
 try:
@@ -47,15 +52,15 @@ except ImportError:
 def init_colors():
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_WHITE,   -1)           # normal
-    curses.init_pair(2, curses.COLOR_CYAN,    -1)           # cyan
-    curses.init_pair(3, curses.COLOR_GREEN,   -1)           # verde
-    curses.init_pair(4, curses.COLOR_YELLOW,  -1)           # amarillo
-    curses.init_pair(5, curses.COLOR_RED,     -1)           # rojo
-    curses.init_pair(6, curses.COLOR_BLACK,   curses.COLOR_CYAN)   # tab activo
-    curses.init_pair(7, curses.COLOR_BLACK,   curses.COLOR_GREEN)  # botón ok
-    curses.init_pair(8, curses.COLOR_MAGENTA, -1)           # título
-    curses.init_pair(9, curses.COLOR_BLACK,   curses.COLOR_YELLOW) # warn
+    curses.init_pair(1, curses.COLOR_WHITE,   -1)
+    curses.init_pair(2, curses.COLOR_CYAN,    -1)
+    curses.init_pair(3, curses.COLOR_GREEN,   -1)
+    curses.init_pair(4, curses.COLOR_YELLOW,  -1)
+    curses.init_pair(5, curses.COLOR_RED,     -1)
+    curses.init_pair(6, curses.COLOR_BLACK,   curses.COLOR_CYAN)
+    curses.init_pair(7, curses.COLOR_BLACK,   curses.COLOR_GREEN)
+    curses.init_pair(8, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(9, curses.COLOR_BLACK,   curses.COLOR_YELLOW)
 
 C_NORM   = lambda: curses.color_pair(1)
 C_CYAN   = lambda: curses.color_pair(2)
@@ -68,7 +73,7 @@ C_TITLE  = lambda: curses.color_pair(8) | curses.A_BOLD
 C_WARN   = lambda: curses.color_pair(9) | curses.A_BOLD
 
 
-# ── HELPER DRAW ───────────────────────────────────────────────────────────────
+# ── HELPERS DE DIBUJO ─────────────────────────────────────────────────────────
 
 def sadd(win, y, x, text, attr=0):
     h, w = win.getmaxyx()
@@ -86,7 +91,6 @@ def hline(win, y, x, w, char="─", attr=0):
     sadd(win, y, x, char * min(w, win.getmaxyx()[1] - x - 1), attr)
 
 def flash_msg(win, h, msg, color=None):
-    """Muestra mensaje temporal en la línea de estado."""
     if color is None:
         color = C_GREEN()
     sadd(win, h - 2, 1, " " * (win.getmaxyx()[1] - 2))
@@ -98,7 +102,6 @@ def flash_msg(win, h, msg, color=None):
 # ── INPUT MODAL ───────────────────────────────────────────────────────────────
 
 def pedir_input(stdscr, prompt: str, y: int, x: int, ancho: int = 20) -> str:
-    """Input inline en la pantalla curses."""
     curses.curs_set(1)
     sadd(stdscr, y, x, prompt, C_CYAN() | curses.A_BOLD)
     sadd(stdscr, y, x + len(prompt), " " * ancho)
@@ -112,9 +115,9 @@ def pedir_input(stdscr, prompt: str, y: int, x: int, ancho: int = 20) -> str:
         except curses.error:
             pass
         key = stdscr.getch()
-        if key in (10, 13):           # Enter
+        if key in (10, 13):
             break
-        elif key in (27,):            # Esc — cancelar
+        elif key in (27,):
             curses.curs_set(0)
             return ""
         elif key in (curses.KEY_BACKSPACE, 127, 8):
@@ -152,60 +155,62 @@ def pedir_int_modal(stdscr, prompt: str, y: int, x: int) -> int:
     return int(val)
 
 
-# ── PANEL IZQUIERDO — PRODUCTOS ───────────────────────────────────────────────
+# ── MENÚ DINÁMICO — construido desde DB ───────────────────────────────────────
 
-MENU_PRODUCTOS = [
-    ("1", "CHI",  "Chicharrón",   False),
-    ("2", "M1LT", "Manteca 1lt",  False),
-    ("3", "M05",  "Manteca ½lt",  False),
-    ("4", "CHO",  "Chorizo",      False),
-    ("5", "CUB",  "Cubeta 19lt",  True),   # precio variable
-    ("6", "LIB",  "+ Artículo",   True),   # libre
-]
+def _color_stock(sku: str, tipo_venta: str, stock: float):
+    """Retorna (stock_str, color) según tipo de producto y nivel de stock."""
+    if tipo_venta == "libre":
+        return "", C_CYAN()
+    if tipo_venta == "peso":
+        # chicharrón — en kg
+        if stock <= 0:
+            return "sin stock", C_RED()
+        elif stock <= 5:
+            return f"{stock:.2f} kg", C_YELLOW()
+        else:
+            return f"{stock:.2f} kg", C_GREEN()
+    else:
+        # piezas — normal, variable
+        if stock <= 0:
+            return "sin stock", C_RED()
+        elif stock <= 3:
+            return f"{stock:.0f} pza", C_YELLOW()
+        else:
+            return f"{stock:.0f} pza", C_GREEN()
 
-def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, msg: str = ""):
+
+def _tecla_a_idx(key: int) -> int:
+    """Convierte tecla ASCII '1'-'9' a índice 0-8. Retorna -1 si no aplica."""
+    if ord("1") <= key <= ord("9"):
+        return key - ord("1")
+    return -1
+
+
+# ── PANEL IZQUIERDO — DINÁMICO ────────────────────────────────────────────────
+
+def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, menu: list, msg: str = ""):
+    """
+    Dibuja el panel de productos leyendo 'menu' — lista de rows de get_menu_pos().
+    Cada row tiene: sku, descripcion, tipo_venta, orden_menu, precio_venta, stock.
+    Las teclas 1-9 se asignan según posición en la lista (orden_menu en DB).
+    """
     h, w = win.getmaxyx()
     win.erase()
     win.border()
-
     sadd(win, 0, 2, " PRODUCTOS ", C_TITLE())
 
-    cfg_row = None
-    try:
-        from config import cargar_config
-        cfg_row = cargar_config()
-    except Exception:
-        pass
-
     y = 2
-    for tecla, sku, nombre, variable in MENU_PRODUCTOS:
-        stock = inv_dict.get(sku, {}).get("stock", 0)
-        if sku == "CHI":
-            if stock <= 0:
-                stock_str = "sin stock"
-                color     = C_RED()
-            elif stock <= 5:
-                stock_str = f"{stock:.3f} kg"
-                color     = C_YELLOW()
-            else:
-                stock_str = f"{stock:.3f} kg"
-                color     = C_GREEN()
-        elif sku in ("LIB",):
-            stock_str = ""
-            color     = C_CYAN()
-        elif stock <= 0:
-            stock_str = "sin stock"
-            color     = C_RED()
-        elif stock <= 3:
-            stock_str = f"{stock:.0f} pza"
-            color     = C_YELLOW()
-        else:
-            stock_str = f"{stock:.0f} pza"
-            color     = C_GREEN()
+    for idx, row in enumerate(menu):
+        tecla     = str(idx + 1) if idx < 9 else "?"
+        sku       = row["sku"]
+        nombre    = row["descripcion"][:13]
+        tipo      = row["tipo_venta"]
+        stock     = inv_dict.get(sku, {}).get("stock", 0)
+        stock_str, color = _color_stock(sku, tipo, stock)
 
-        sadd(win, y, 2, f"[{tecla}]", C_CYAN() | curses.A_BOLD)
-        sadd(win, y, 6, f"{nombre:<14}", color)
-        sadd(win, y, 20, stock_str, color)
+        sadd(win, y, 2,  f"[{tecla}]",          C_CYAN() | curses.A_BOLD)
+        sadd(win, y, 6,  f"{nombre:<13}",        color)
+        sadd(win, y, 20, stock_str,              color)
         y += 1
 
     y += 1
@@ -213,26 +218,20 @@ def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, msg: str = ""):
     y += 1
 
     sadd(win, y, 2, "[G]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Registrar gasto", C_NORM())
-    y += 1
+    sadd(win, y, 6, "Registrar gasto",  C_NORM()); y += 1
     sadd(win, y, 2, "[A]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Abrir cubeta", C_NORM())
-    y += 1
-    sadd(win, y, 2, "[I]", C_CYAN() | curses.A_BOLD)
-    sadd(win, y, 6, "Inventario", C_NORM())
-    y += 1
-    sadd(win, y, 2, "[H]", C_CYAN() | curses.A_BOLD)
-    sadd(win, y, 6, "Historial", C_NORM())
-    y += 1
+    sadd(win, y, 6, "Abrir cubeta",     C_NORM()); y += 1
+    sadd(win, y, 2, "[I]", C_CYAN()   | curses.A_BOLD)
+    sadd(win, y, 6, "Inventario",       C_NORM()); y += 1
+    sadd(win, y, 2, "[H]", C_CYAN()   | curses.A_BOLD)
+    sadd(win, y, 6, "Historial",        C_NORM()); y += 1
 
-    hline(win, y, 1, w - 2)
-    y += 1
+    hline(win, y, 1, w - 2); y += 1
 
     sadd(win, y, 2, "[C]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Corte de caja", C_NORM())
-    y += 1
-    sadd(win, y, 2, "[Q]", C_RED() | curses.A_BOLD)
-    sadd(win, y, 6, "Salir", C_NORM())
+    sadd(win, y, 6, "Corte de caja",   C_NORM()); y += 1
+    sadd(win, y, 2, "[Q]", C_RED()    | curses.A_BOLD)
+    sadd(win, y, 6, "Salir",           C_NORM())
 
     if msg:
         sadd(win, h - 2, 1, msg[:w - 3], C_GREEN())
@@ -246,7 +245,6 @@ def draw_panel_ticket(win, sesion: SesionPOS):
     h, w = win.getmaxyx()
     win.erase()
     win.border()
-
     sadd(win, 0, 2, " TICKET ACTUAL ", C_TITLE())
 
     if sesion.ticket is None or sesion.ticket.vacio():
@@ -259,8 +257,12 @@ def draw_panel_ticket(win, sesion: SesionPOS):
         if y >= h - 5:
             sadd(win, y, 2, f"  ... +{len(sesion.ticket.items) - idx} más", C_YELLOW())
             break
-        cant = f"{item.cantidad:.3f}".rstrip("0").rstrip(".") if item.sku == "CHI" else f"{item.cantidad:.0f}"
-        linea = f"[{idx+1}] {item.descripcion[:16]:<16} {cant:>6}  ${item.subtotal:>8,.2f}"
+        # formato cantidad según tipo
+        if item.sku == "CHI":
+            cant = f"{item.cantidad:.3f}kg"
+        else:
+            cant = f"{item.cantidad:.0f} pza"
+        linea = f"[{idx+1}] {item.descripcion[:15]:<15} {cant:>8}  ${item.subtotal:>8,.2f}"
         sadd(win, y, 1, linea, C_NORM())
         y += 1
 
@@ -268,7 +270,6 @@ def draw_panel_ticket(win, sesion: SesionPOS):
     sadd(win, h - 4, 2, "TOTAL", C_CYAN() | curses.A_BOLD)
     sadd(win, h - 4, w - 14, f"${sesion.ticket.total:>10,.2f}",
          C_GREEN() | curses.A_BOLD)
-
     sadd(win, h - 2, 2, "[X] quitar item   [P] cobrar   [Esc] limpiar",
          C_NORM())
 
@@ -280,10 +281,9 @@ def draw_panel_ticket(win, sesion: SesionPOS):
 def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
     """
     Modal de cobro inteligente.
-    1. Pregunta método de pago
-    2. Si el monto cubre el total → cambio y cobra
-    3. Si no cubre → ofrece segundo método
-    4. Nunca pide métodos innecesarios
+    1. Elige método principal → ingresa monto
+    2. Si cubre → cobra con cambio
+    3. Si no cubre → pide segundo método
     """
     h, w  = stdscr.getmaxyx()
     total = sesion.ticket.total
@@ -304,50 +304,40 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         sadd(stdscr, my + 7,  mx+1, f"│  [3] Tarjeta{' '*23}│", C_NORM())
         sadd(stdscr, my + 8,  mx+1, f"│  [Esc] Cancelar{' '*19}│", C_NORM())
         sadd(stdscr, my + 9,  mx+1, f"├{'─'*36}┤", C_CYAN())
-        sadd(stdscr, my + 10, mx+1, f"│{' '*36}│", C_CYAN())
-        sadd(stdscr, my + 11, mx+1, f"│{' '*36}│", C_CYAN())
-        sadd(stdscr, my + 12, mx+1, f"│{' '*36}│", C_CYAN())
-        sadd(stdscr, my + 13, mx+1, f"├{'─'*36}┤", C_CYAN())
-        sadd(stdscr, my + 14, mx+1, f"│{' '*36}│", C_CYAN())
+        for i in range(10, 15):
+            sadd(stdscr, my + i, mx+1, f"│{' '*36}│", C_CYAN())
         sadd(stdscr, my + 15, mx+1, f"└{'─'*36}┘", C_CYAN())
         stdscr.refresh()
 
     METODOS = {ord("1"): "efectivo", ord("2"): "transfer", ord("3"): "tarjeta"}
     LABELS  = {"efectivo": "Efectivo  ", "transfer": "Transfer  ", "tarjeta": "Tarjeta   "}
-
     pagos   = {"efectivo": 0.0, "transfer": 0.0, "tarjeta": 0.0}
 
-    # ── PASO 1: elegir método principal ──────────────────────────────
+    # paso 1: elegir método principal
     _dibujar_caja()
     while True:
         key = stdscr.getch()
         if key == 27:
-            return ""   # cancelar
+            return ""
         if key in METODOS:
             metodo1 = METODOS[key]
             break
 
-    # ── PASO 2: ingresar monto del método principal ───────────────────
+    # paso 2: ingresar monto
     _dibujar_caja()
-    sadd(stdscr, my + 10, mx + 2,
-         f"  {LABELS[metodo1]}$", C_CYAN() | curses.A_BOLD)
-    stdscr.refresh()
     monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
-
     if monto1 <= 0:
         return ""
 
     pagos[metodo1] = monto1
     restante = round(total - monto1, 2)
 
-    # ── PASO 3: ¿cubre el total? ──────────────────────────────────────
+    # paso 3: ¿cubre?
     if restante <= 0:
-        # cubre — mostrar cambio si aplica
         cambio = abs(restante)
         if cambio > 0:
             sadd(stdscr, my + 11, mx + 2,
-                 f"  CAMBIO: ${cambio:>8.2f}          ",
-                 C_YELLOW() | curses.A_BOLD)
+                 f"  CAMBIO: ${cambio:>8.2f}          ", C_YELLOW() | curses.A_BOLD)
         else:
             sadd(stdscr, my + 11, mx + 2,
                  f"  Exacto ✓                    ", C_GREEN())
@@ -357,42 +347,33 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         key = stdscr.getch()
         if key == 27:
             return ""
-
     else:
-        # no cubre — pedir segundo método
+        # necesita segundo método
         sadd(stdscr, my + 11, mx + 2,
              f"  Falta: ${restante:>8.2f}              ", C_RED() | curses.A_BOLD)
         sadd(stdscr, my + 12, mx + 2,
              "  2do método: [1]Ef [2]Tr [3]Ta [Esc]", C_CYAN())
         stdscr.refresh()
-
         key = stdscr.getch()
         if key == 27:
             return ""
-
         if key in METODOS:
             metodo2 = METODOS[key]
             if metodo2 == metodo1:
-                metodo2 = "efectivo" if metodo1 != "efectivo" else "transfer"
-            sadd(stdscr, my + 12, mx + 2,
-                 f"  {LABELS[metodo2]}$               ", C_CYAN())
-            stdscr.refresh()
-            monto2 = pedir_float_modal(stdscr,
-                                        f"  {LABELS[metodo2]}$", my + 12, mx + 2)
+                metodo2 = "transfer" if metodo1 != "transfer" else "efectivo"
+            monto2 = pedir_float_modal(stdscr, f"  {LABELS[metodo2]}$", my + 12, mx + 2)
             pagos[metodo2] = monto2
             total_pagado   = monto1 + monto2
             if total_pagado < total - 0.01:
                 sadd(stdscr, my + 14, mx + 2,
-                     f"  FALTA ${total-total_pagado:.2f} — [Enter]retry",
-                     C_RED() | curses.A_BOLD)
+                     f"  FALTA ${total-total_pagado:.2f} — [Enter]", C_RED() | curses.A_BOLD)
                 stdscr.refresh()
                 stdscr.getch()
                 return "retry"
             cambio = round(total_pagado - total, 2)
             if cambio > 0:
                 sadd(stdscr, my + 13, mx + 2,
-                     f"  CAMBIO: ${cambio:.2f}          ",
-                     C_YELLOW() | curses.A_BOLD)
+                     f"  CAMBIO: ${cambio:.2f}          ", C_YELLOW() | curses.A_BOLD)
             sadd(stdscr, my + 14, mx + 2,
                  "  [Enter] cobrar  [Esc] cancelar  ", C_NORM())
             stdscr.refresh()
@@ -400,13 +381,12 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
             if key == 27:
                 return ""
 
-    # ── PASO 4: cobrar ────────────────────────────────────────────────
+    # paso 4: cobrar
     try:
-        resultado  = cobrar(sesion, pagos)
-        ticket_id  = resultado["ticket_id"]
-        cambio     = resultado["cambio"]
+        resultado = cobrar(sesion, pagos)
+        ticket_id = resultado["ticket_id"]
+        cambio    = resultado["cambio"]
 
-        # respaldo texto siempre
         txt  = imprimir_ticket(ticket_id)
         ruta = os.path.expanduser(f"~/bayosys/data/ticket_{ticket_id:04d}.txt")
         os.makedirs(os.path.dirname(ruta), exist_ok=True)
@@ -421,14 +401,12 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 
         if key in (ord("p"), ord("P")):
             if not IMPRESORA_DISPONIBLE:
-                return (f"ticket #{ticket_id:04d} cobrado — "
-                        f"impresora no disponible, respaldo en {ruta}")
+                return f"ticket #{ticket_id:04d} cobrado — sin impresora, respaldo en {ruta}"
             try:
                 imprimir_ticket_fisico(ticket_id, pagos, cambio)
                 return f"ticket #{ticket_id:04d} cobrado e impreso OK"
             except ErrorImpresora as e:
-                return (f"ticket #{ticket_id:04d} cobrado, NO imprimió "
-                        f"({e}) — respaldo en {ruta}")
+                return f"ticket #{ticket_id:04d} cobrado, NO imprimió ({e})"
 
         return f"ticket #{ticket_id:04d} cobrado OK — cambio ${cambio:.2f}"
 
@@ -445,19 +423,24 @@ def pantalla_inventario(stdscr):
     hline(stdscr, 1, 0, w)
 
     inv = get_estado_inventario()
-    sadd(stdscr, 2, 2, f"{'SKU':<8} {'Descripción':<22} {'Stock':>8} {'Precio':>10}", C_CYAN())
+    sadd(stdscr, 2, 2,
+         f"{'SKU':<8} {'Descripción':<20} {'Tipo':<10} {'Stock':>7} {'Precio':>10}",
+         C_CYAN())
     hline(stdscr, 3, 2, w - 4)
 
     for i, row in enumerate(inv):
-        y = 4 + i
+        y     = 4 + i
         stock = row["stock"]
-        color = C_RED() if stock <= 0 else (C_YELLOW() if stock <= 3 else C_GREEN())
+        tipo  = row["tipo_venta"]
+        stock_str, color = _color_stock(row["sku"], tipo, stock)
         sadd(stdscr, y, 2,
-             f"{row['sku']:<8} {row['descripcion']:<22} {stock:>8.0f} ${row['precio_venta']:>9.2f}",
-             color if row["sku"] not in ("CHI", "LIB") else C_NORM())
+             f"{row['sku']:<8} {row['descripcion']:<20} {tipo:<10} "
+             f"{stock_str:>7}  ${row['precio_venta']:>9.2f}",
+             color if tipo != "libre" else C_NORM())
 
     hline(stdscr, h - 3, 0, w)
-    sadd(stdscr, h - 2, 2, "[C] carga manual   [A] abrir cubeta   [Esc] volver", C_NORM())
+    sadd(stdscr, h - 2, 2,
+         "[C] carga manual   [A] abrir cubeta   [Esc] volver", C_NORM())
     stdscr.refresh()
 
     while True:
@@ -465,20 +448,17 @@ def pantalla_inventario(stdscr):
         if key in (27, ord("q"), ord("Q")):
             break
         elif key in (ord("c"), ord("C")):
-            # carga manual
-            skus = [r["sku"] for r in inv if r["sku"] not in ("CHI", "LIB")]
-            sadd(stdscr, h - 4, 2, f"SKU ({'/'.join(skus)}): ", C_CYAN())
-            stdscr.refresh()
-            sku_raw = pedir_input(stdscr, f"SKU: ", h - 4, 2, 8).upper()
+            skus = [r["sku"] for r in inv if r["tipo_venta"] not in ("libre",)]
+            sku_raw = pedir_input(stdscr, "SKU: ", h - 4, 2, 8).upper()
             if sku_raw in skus:
-                cant = pedir_int_modal(stdscr, f"Cantidad +: ", h - 4, 2)
+                cant = pedir_int_modal(stdscr, "Cantidad +: ", h - 4, 12)
                 if cant > 0:
                     try:
                         msg = carga_manual_stock(sku_raw, cant)
                         flash_msg(stdscr, h, msg)
                     except ErrorPOS as e:
                         flash_msg(stdscr, h, str(e), C_RED())
-            break  # refrescar inventario
+            break
         elif key in (ord("a"), ord("A")):
             break
 
@@ -498,8 +478,7 @@ def pantalla_historial(stdscr):
     hline(stdscr, 3, 2, w - 4)
 
     for i, t in enumerate(tickets[-20:]):
-        y = 4 + i
-        sadd(stdscr, y, 2,
+        sadd(stdscr, 4 + i, 2,
              f"{t['id']:>4}  {t['hora'][:5]:<6}  "
              f"${t['pago_efectivo']:>7.0f}  "
              f"${t['pago_transfer']:>7.0f}  "
@@ -521,7 +500,8 @@ def pantalla_historial(stdscr):
 def pantalla_corte(stdscr, sesion: SesionPOS) -> str:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    sadd(stdscr, 0, 0, f" CORTE DE CAJA — batch#{sesion.batch_id} ".center(w), C_TITLE())
+    sadd(stdscr, 0, 0,
+         f" CORTE DE CAJA — batch#{sesion.batch_id} ".center(w), C_TITLE())
     hline(stdscr, 1, 0, w)
 
     try:
@@ -540,21 +520,19 @@ def pantalla_corte(stdscr, sesion: SesionPOS) -> str:
         sadd(stdscr, y, 32, valor, color or C_NORM())
         y += 1
 
-    fila("tickets del turno",  f"{corte['n_tickets']}")
+    fila("tickets del turno",   f"{corte['n_tickets']}")
     y += 1
-    fila("ventas efectivo",    f"${corte['ventas_efectivo']:,.2f}", C_GREEN())
-    fila("ventas transferencia",f"${corte['ventas_transfer']:,.2f}", C_GREEN())
-    fila("ventas tarjeta",     f"${corte['ventas_tarjeta']:,.2f}",  C_GREEN())
-    hline(stdscr, y, 4, 40)
+    fila("ventas efectivo",     f"${corte['ventas_efectivo']:,.2f}", C_GREEN())
+    fila("ventas transferencia", f"${corte['ventas_transfer']:,.2f}", C_GREEN())
+    fila("ventas tarjeta",      f"${corte['ventas_tarjeta']:,.2f}",  C_GREEN())
+    hline(stdscr, y, 4, 40); y += 1
+    fila("TOTAL VENTAS",        f"${corte['total_ventas']:,.2f}", C_GREEN() | curses.A_BOLD)
+    fila("gastos del turno",    f"${corte['total_gastos']:,.2f}", C_YELLOW())
+    hline(stdscr, y, 4, 40); y += 1
+    fila("NETO",                f"${corte['neto']:,.2f}", C_CYAN() | curses.A_BOLD)
     y += 1
-    fila("TOTAL VENTAS",       f"${corte['total_ventas']:,.2f}", C_GREEN() | curses.A_BOLD)
-    fila("gastos del turno",   f"${corte['total_gastos']:,.2f}", C_YELLOW())
-    hline(stdscr, y, 4, 40)
-    y += 1
-    fila("NETO",               f"${corte['neto']:,.2f}", C_CYAN() | curses.A_BOLD)
-    y += 1
-    fila("fondo de caja",      f"${corte['fondo_caja']:,.2f}", C_NORM())
-    fila("A ENTREGAR",         f"${corte['a_entregar']:,.2f}",
+    fila("fondo de caja",       f"${corte['fondo_caja']:,.2f}", C_NORM())
+    fila("A ENTREGAR",          f"${corte['a_entregar']:,.2f}",
          C_GREEN() | curses.A_BOLD if corte['a_entregar'] > 0 else C_NORM())
 
     hline(stdscr, h - 3, 0, w)
@@ -592,9 +570,69 @@ def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = ""):
         sadd(stdscr, h - 2, 2, f" {msg[:w-6]} ", C_GREEN())
 
 
+# ── HANDLER DINÁMICO POR tipo_venta ──────────────────────────────────────────
+
+def _procesar_item(stdscr, sesion: SesionPOS, row, h: int, w: int) -> str:
+    """
+    Ejecuta el flujo de venta correcto según tipo_venta del SKU.
+    Retorna mensaje de resultado para la barra de estado.
+    Esto reemplaza el bloque if/elif hardcodeado por SKU.
+    """
+    sku       = row["sku"]
+    tipo      = row["tipo_venta"]
+    nombre    = row["descripcion"]
+    precio    = row["precio_venta"]
+
+    if sesion.ticket is None:
+        sesion.nuevo_ticket()
+
+    try:
+        if tipo == "peso":
+            # cantidad decimal en kg (CHI)
+            kg = pedir_float_modal(stdscr, f"kg {nombre}: ", h // 2, w // 2 - 14)
+            if kg <= 0:
+                return ""
+            agregar_chicharron(sesion, kg)
+            return f"{nombre} {kg:.3f}kg agregado"
+
+        elif tipo == "variable":
+            # precio negociado en el momento (CUB)
+            precio_neg = pedir_float_modal(stdscr, f"precio {nombre} $: ", h // 2, w // 2 - 14)
+            if precio_neg <= 0:
+                return ""
+            cant = pedir_int_modal(stdscr, "cantidad: ", h // 2 + 1, w // 2 - 14)
+            if cant <= 0:
+                return ""
+            agregar_producto_precio_variable(sesion, sku, cant, precio_neg)
+            return f"{cant} × {nombre} ${precio_neg:.0f} agregado"
+
+        elif tipo == "libre":
+            # descripción y precio libres (LIB)
+            desc = pedir_input(stdscr, "descripción: ", h // 2, w // 2 - 14, 20)
+            if not desc:
+                return ""
+            precio_lib = pedir_float_modal(stdscr, "precio $: ", h // 2 + 1, w // 2 - 14)
+            cant       = pedir_int_modal(stdscr, "cantidad: ",  h // 2 + 2, w // 2 - 14)
+            if precio_lib <= 0 or cant <= 0:
+                return ""
+            agregar_articulo_libre(sesion, desc, cant, precio_lib)
+            return f"'{desc}' agregado"
+
+        else:
+            # normal — cantidad entera, precio fijo
+            cant = pedir_int_modal(stdscr, f"piezas {nombre}: ", h // 2, w // 2 - 14)
+            if cant <= 0:
+                return ""
+            agregar_producto(sesion, sku, cant)
+            return f"{cant} × {nombre} agregado"
+
+    except ErrorPOS as e:
+        return f"! {e}"
+
+
 # ── LOOP PRINCIPAL ────────────────────────────────────────────────────────────
 
-def main(stdscr, batch_id: int, operador: str = "Luis"):
+def main(stdscr, batch_id: str, operador: str = "Luis"):
     curses.curs_set(0)
     stdscr.keypad(True)
     init_colors()
@@ -606,105 +644,43 @@ def main(stdscr, batch_id: int, operador: str = "Luis"):
         h, w = stdscr.getmaxyx()
         stdscr.erase()
 
-        # layout: izquierda 30 cols, derecha el resto
+        # leer menú dinámico desde DB en cada frame
+        menu = list(get_menu_pos())
+
+        # layout
         ancho_izq = min(32, w // 3)
         ancho_der = w - ancho_izq
+        win_izq   = stdscr.derwin(h - 1, ancho_izq, 0, 0)
+        win_der   = stdscr.derwin(h - 1, ancho_der, 0, ancho_izq)
 
-        # crear subventanas
-        win_izq = stdscr.derwin(h - 1, ancho_izq, 0, 0)
-        win_der = stdscr.derwin(h - 1, ancho_der, 0, ancho_izq)
-
-        # inventario para mostrar stock
-        inv_raw = get_estado_inventario()
+        # inventario para stock
+        inv_raw  = get_estado_inventario()
         inv_dict = {r["sku"]: {"stock": r["stock"], "precio": r["precio_venta"]}
                     for r in inv_raw}
 
-        draw_panel_izq(win_izq, sesion, inv_dict)
+        draw_panel_izq(win_izq, sesion, inv_dict, menu)
         draw_panel_ticket(win_der, sesion)
         draw_statusbar(stdscr, sesion, msg)
-
         stdscr.refresh()
-        msg = ""  # limpiar después de mostrar
+        msg = ""
 
         key = stdscr.getch()
 
-        # ── PRODUCTOS ─────────────────────────────────────────────────
-        if key == ord("1"):   # chicharrón
-            if sesion.ticket is None:
-                sesion.nuevo_ticket()
-            kg = pedir_float_modal(stdscr, "kg chicharrón: ", h // 2, w // 2 - 12)
-            if kg > 0:
-                try:
-                    agregar_chicharron(sesion, kg)
-                    msg = f"chicharrón {kg:.3f}kg agregado"
-                except ErrorPOS as e:
-                    msg = f"! {e}"
-
-        elif key == ord("2"):  # manteca 1lt
-            if sesion.ticket is None:
-                sesion.nuevo_ticket()
-            cant = pedir_int_modal(stdscr, "piezas 1lt: ", h // 2, w // 2 - 12)
-            if cant > 0:
-                try:
-                    agregar_producto(sesion, "M1LT", cant)
-                    msg = f"{cant} × Manteca 1lt agregados"
-                except ErrorPOS as e:
-                    msg = f"! {e}"
-
-        elif key == ord("3"):  # manteca ½lt
-            if sesion.ticket is None:
-                sesion.nuevo_ticket()
-            cant = pedir_int_modal(stdscr, "piezas ½lt: ", h // 2, w // 2 - 12)
-            if cant > 0:
-                try:
-                    agregar_producto(sesion, "M05", cant)
-                    msg = f"{cant} × Manteca ½lt agregados"
-                except ErrorPOS as e:
-                    msg = f"! {e}"
-
-        elif key == ord("4"):  # chorizo
-            if sesion.ticket is None:
-                sesion.nuevo_ticket()
-            cant = pedir_int_modal(stdscr, "piezas chorizo: ", h // 2, w // 2 - 12)
-            if cant > 0:
-                try:
-                    agregar_producto(sesion, "CHO", cant)
-                    msg = f"{cant} × Chorizo agregados"
-                except ErrorPOS as e:
-                    msg = f"! {e}"
-
-        elif key == ord("5"):  # cubeta precio variable
-            if sesion.ticket is None:
-                sesion.nuevo_ticket()
-            precio = pedir_float_modal(stdscr, "precio cubeta $: ", h // 2, w // 2 - 14)
-            if precio > 0:
-                try:
-                    agregar_producto_precio_variable(sesion, "CUB", 1, precio)
-                    msg = f"cubeta ${precio:.0f} agregada"
-                except ErrorPOS as e:
-                    msg = f"! {e}"
-
-        elif key == ord("6"):  # artículo libre
-            if sesion.ticket is None:
-                sesion.nuevo_ticket()
-            desc  = pedir_input(stdscr, "descripción: ", h // 2,     w // 2 - 14, 20)
-            if desc:
-                precio = pedir_float_modal(stdscr, "precio $: ",     h // 2 + 1, w // 2 - 14)
-                cant   = pedir_int_modal(stdscr,   "cantidad: ",      h // 2 + 2, w // 2 - 14)
-                if precio > 0 and cant > 0:
-                    try:
-                        agregar_articulo_libre(sesion, desc, cant, precio)
-                        msg = f"'{desc}' agregado"
-                    except ErrorPOS as e:
-                        msg = f"! {e}"
+        # ── TECLAS 1-9 → productos dinámicos ─────────────────────────
+        idx = _tecla_a_idx(key)
+        if 0 <= idx < len(menu):
+            resultado = _procesar_item(stdscr, sesion, menu[idx], h, w)
+            if resultado:
+                msg = resultado
+            continue
 
         # ── QUITAR ITEM ───────────────────────────────────────────────
-        elif key in (ord("x"), ord("X")):
+        if key in (ord("x"), ord("X")):
             if sesion.ticket and not sesion.ticket.vacio():
-                idx = pedir_int_modal(stdscr, "quitar ítem #: ", h // 2, w // 2 - 14)
-                if 1 <= idx <= sesion.ticket.n_items:
-                    sesion.ticket.quitar(idx - 1)
-                    msg = f"ítem #{idx} quitado"
+                idx_q = pedir_int_modal(stdscr, "quitar ítem #: ", h // 2, w // 2 - 14)
+                if 1 <= idx_q <= sesion.ticket.n_items:
+                    sesion.ticket.quitar(idx_q - 1)
+                    msg = f"ítem #{idx_q} quitado"
 
         # ── COBRAR ────────────────────────────────────────────────────
         elif key in (ord("p"), ord("P")):
@@ -717,7 +693,7 @@ def main(stdscr, batch_id: int, operador: str = "Luis"):
                 msg = "! ticket vacío"
 
         # ── LIMPIAR TICKET ────────────────────────────────────────────
-        elif key == 27:   # Esc
+        elif key == 27:
             if sesion.ticket and not sesion.ticket.vacio():
                 sesion.ticket.limpiar()
                 msg = "ticket limpiado"
@@ -729,11 +705,9 @@ def main(stdscr, batch_id: int, operador: str = "Luis"):
             sadd(stdscr, h // 2 - 2, w // 2 - 14, "[1]Gas [2]Leche [3]General", C_CYAN())
             stdscr.refresh()
             tipo_key = stdscr.getch()
-            tipo = {"49": "gas", "50": "leche", "51": "gral"}.get(str(tipo_key))
-            if not tipo:
-                tipo = "gral"
-            monto = pedir_float_modal(stdscr, "monto $: ", h // 2, w // 2 - 14)
-            desc  = pedir_input(stdscr, "descripción: ", h // 2 + 1, w // 2 - 14, 25)
+            tipo = {ord("1"): "gas", ord("2"): "leche", ord("3"): "gral"}.get(tipo_key, "gral")
+            monto = pedir_float_modal(stdscr, "monto $: ",      h // 2,     w // 2 - 14)
+            desc  = pedir_input(stdscr,       "descripción: ",  h // 2 + 1, w // 2 - 14, 25)
             if monto > 0:
                 try:
                     registrar_gasto(sesion.batch_id, tipo, monto, desc)
@@ -743,11 +717,11 @@ def main(stdscr, batch_id: int, operador: str = "Luis"):
 
         # ── ABRIR CUBETA ──────────────────────────────────────────────
         elif key in (ord("a"), ord("A")):
-            e1 = pedir_int_modal(stdscr, "envases 1lt a cargar: ",  h // 2,     w // 2 - 16)
-            e05= pedir_int_modal(stdscr, "envases ½lt a cargar: ",  h // 2 + 1, w // 2 - 16)
+            e1  = pedir_int_modal(stdscr, "envases 1lt a cargar: ",  h // 2,     w // 2 - 16)
+            e05 = pedir_int_modal(stdscr, "envases ½lt a cargar: ",  h // 2 + 1, w // 2 - 16)
             if e1 > 0 or e05 > 0:
                 try:
-                    r = abrir_cubeta_pos(e1, e05)
+                    r   = abrir_cubeta_pos(e1, e05)
                     msg = r["mensaje"]
                 except ErrorPOS as e:
                     msg = f"! {e}"
@@ -774,9 +748,9 @@ def main(stdscr, batch_id: int, operador: str = "Luis"):
                 break
 
 
-def iniciar_pos_tui(batch_id: int, operador: str = "Luis"):
+def iniciar_pos_tui(batch_id: str, operador: str = "Luis"):
     curses.wrapper(main, batch_id, operador)
 
 
 if __name__ == "__main__":
-    iniciar_pos_tui(batch_id=1)
+    iniciar_pos_tui(batch_id="test")
