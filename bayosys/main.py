@@ -3,6 +3,12 @@
 main.py — bayoSys · Productos El Bayo
 Punto de entrada único. Navega todos los módulos desde aquí.
 Uso: python3 main.py
+
+CAMBIOS:
+  - [7] Administración — alta/edición/baja de productos del catálogo POS
+    sin tocar código. El catálogo vive 100% en pos_db.py (SQLite).
+  - Cancelación explícita en cada paso del wizard admin (Enter o 0 = salir)
+  - El registro de batches, POS y guardian NO se modifican.
 """
 
 import os
@@ -19,7 +25,7 @@ from tui import iniciar_tui
 from pos_db import init_db, calcular_corte, guardar_corte
 from guardian import verificar_integridad
 
-# ── HELPERS ──────────────────────────────────────────────────────────────────
+# ── HELPERS GENERALES ─────────────────────────────────────────────────────────
 
 def _sep(char="═", ancho=54):
     print(char * ancho)
@@ -39,6 +45,65 @@ def _pedir_float(prompt, minimo, maximo) -> float:
             print(f"  ! rango válido: {minimo}–{maximo}")
         except ValueError:
             print("  ! ingresa un número")
+
+
+# ── HELPERS CANCELABLES — solo para wizards del menú admin ───────────────────
+# Todo paso del wizard de catálogo puede abortarse con Enter o '0'.
+# Se usa una excepción interna para desenrollar el flujo limpio hasta
+# el punto de entrada de la operación, sin dejar la conexión SQLite a medias.
+
+class _Cancelado(Exception):
+    """Señal interna — el usuario abortó el wizard a la mitad."""
+    pass
+
+
+def _pedir_texto_c(prompt, min_len=1, max_len=30) -> str:
+    while True:
+        val = input(f"  {prompt}  [Enter=cancelar]: ").strip()
+        if val == "":
+            raise _Cancelado()
+        if min_len <= len(val) <= max_len:
+            return val
+        print(f"  ! largo válido: {min_len}–{max_len} caracteres")
+
+
+def _pedir_opcion_c(prompt, opciones: list) -> str:
+    for i, op in enumerate(opciones, 1):
+        print(f"  [{i}] {op}")
+    print(f"  [0] cancelar")
+    while True:
+        raw = input(f"  {prompt}: ").strip()
+        if raw == "" or raw == "0":
+            raise _Cancelado()
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(opciones):
+                return opciones[idx - 1]
+            print(f"  ! elige entre 0 y {len(opciones)}")
+        except ValueError:
+            print("  ! ingresa el número de la opción")
+
+
+def _pedir_float_c(prompt, minimo, maximo) -> float:
+    while True:
+        raw = input(f"  {prompt}  [Enter=cancelar]: ").strip()
+        if raw == "":
+            raise _Cancelado()
+        try:
+            val = float(raw)
+            if minimo <= val <= maximo:
+                return val
+            print(f"  ! rango válido: {minimo}–{maximo}")
+        except ValueError:
+            print("  ! ingresa un número")
+
+
+def _pedir_sku_c(prompt) -> str:
+    """SKU en mayúsculas, cancelable con Enter."""
+    val = input(f"  {prompt}  [Enter=cancelar]: ").strip().upper()
+    if val == "":
+        raise _Cancelado()
+    return val
 
 
 # ── ESTADO DEL DÍA ───────────────────────────────────────────────────────────
@@ -72,11 +137,8 @@ def _estado_hoy() -> str:
 
 
 # ── BATCH ACTIVO ──────────────────────────────────────────────────────────────
-# Persiste el batch_id activo del POS en un archivo simple
-# para sobrevivir reinicios del sistema
 
 def _ruta_batch_activo() -> str:
-    import os
     base = os.path.join(os.path.expanduser("~"), "bayosys", "data")
     os.makedirs(base, exist_ok=True)
     return os.path.join(base, "batch_activo.txt")
@@ -93,7 +155,6 @@ def get_batch_activo() -> str | None:
         return None
 
 def set_batch_activo(batch_id: str | None):
-    """Guarda o limpia el batch_id activo."""
     ruta = _ruta_batch_activo()
     if batch_id is None:
         if os.path.exists(ruta):
@@ -103,18 +164,13 @@ def set_batch_activo(batch_id: str | None):
             f.write(str(batch_id))
 
 def hay_corte_pendiente(batch_id: str) -> bool:
-    """
-    True si el batch tiene ventas registradas Y no tiene corte guardado.
-    Evita falso positivo cuando ya se cortó pero hubo más ventas después.
-    """
     from pos_db import tiene_corte_guardado
     corte = calcular_corte(batch_id=batch_id)
     if corte["n_tickets"] == 0:
         return False
     return not tiene_corte_guardado(batch_id)
 
-def hacer_corte_entre_batches(batch_id: int):
-    """Muestra resumen y guarda el corte del batch anterior."""
+def hacer_corte_entre_batches(batch_id: str):
     print()
     _sep("─")
     print(f"  CORTE DE CAJA — batch #{batch_id}")
@@ -235,6 +291,242 @@ def menu_config():
             break
 
 
+# ── MENÚ DE ADMINISTRACIÓN — CATÁLOGO DE PRODUCTOS ───────────────────────────
+# Todo el catálogo del POS vive en pos_db.py (SQLite).
+# Este menú es la única puerta para tocarlo sin editar código.
+# Cada paso es cancelable con Enter o 0 — nunca se queda atrapado a la mitad.
+
+def _mostrar_catalogo():
+    from pos_db import get_inventario
+    inv = get_inventario()
+    print()
+    print(f"  {'SKU':<8} {'Descripción':<20} {'Tipo':<10} {'Origen':<12} "
+          f"{'Menú':>5} {'Orden':>6} {'Stock':>8} {'Precio':>9}  Estado")
+    _sep("─", 78)
+    for row in inv:
+        estado = "activo" if row["activo"] else "INACTIVO"
+        print(f"  {row['sku']:<8} {row['descripcion']:<20} "
+              f"{row['tipo_venta']:<10} {row['origen']:<12} "
+              f"{'sí' if row['es_menu'] else 'no':>5} "
+              f"{row['orden_menu']:>6} "
+              f"{row['stock']:>8.2f} "
+              f"${row['precio_venta']:>8.2f}  {estado}")
+    print()
+
+
+def _alta_producto():
+    """
+    Wizard de alta — cada paso cancelable con Enter.
+    Si se cancela a la mitad, no se escribe nada en la DB.
+    """
+    from pos_db import agregar_sku_catalogo, get_sku
+
+    print()
+    _sep("─")
+    print("  ALTA DE PRODUCTO NUEVO   [Enter en cualquier paso = cancelar]")
+    _sep("─")
+
+    try:
+        sku = _pedir_sku_c("SKU (código corto, ej: TORT)")
+
+        if get_sku(sku):
+            print(f"  ! el SKU '{sku}' ya existe — usa [2] editar en su lugar")
+            if not _confirmar("  ¿deseas sobreescribirlo de todos modos?"):
+                print("\n  cancelado — nada se modificó\n")
+                return
+
+        descripcion = _pedir_texto_c("descripción (ej: Tortillas)", 1, 30)
+        unidad      = _pedir_opcion_c("unidad de venta", ["pza", "kg"])
+
+        print("\n  tipo de venta:")
+        print("    normal   → cantidad entera, precio fijo (ej: chorizo)")
+        print("    peso     → cantidad decimal en kg (ej: chicharrón)")
+        print("    variable → precio se negocia cada vez (ej: cubeta)")
+        print("    libre    → descripción y precio libres")
+        tipo_venta = _pedir_opcion_c("tipo de venta",
+                                      ["normal", "peso", "variable", "libre"])
+
+        precio = _pedir_float_c(f"precio de venta $/{unidad}", 0, 9999)
+
+        print("\n  origen del stock:")
+        print("    manual     → se carga a mano desde inventario o admin")
+        print("    produccion → se carga automático desde registro de batch")
+        print("    apertura   → se carga al abrir cubeta")
+        origen = _pedir_opcion_c("origen del stock",
+                                  ["manual", "produccion", "apertura"])
+
+        orden = int(_pedir_float_c("posición en menú POS (1-9, 9=al final)", 1, 9))
+
+    except _Cancelado:
+        print("\n  ✗ alta cancelada — nada se guardó\n")
+        return
+
+    print()
+    _sep("─")
+    print(f"  SKU:         {sku}")
+    print(f"  descripción: {descripcion}")
+    print(f"  unidad:      {unidad}")
+    print(f"  tipo_venta:  {tipo_venta}")
+    print(f"  precio:      ${precio:.2f}")
+    print(f"  origen:      {origen}")
+    print(f"  orden menú:  [{orden}]")
+    _sep("─")
+
+    if not _confirmar("  ¿guardar este producto?"):
+        print("\n  ✗ alta cancelada — nada se guardó\n")
+        return
+
+    creado = agregar_sku_catalogo(
+        sku=sku, descripcion=descripcion, unidad=unidad,
+        precio=precio, tipo_venta=tipo_venta, origen=origen,
+        es_menu=1, orden_menu=orden
+    )
+
+    if creado:
+        print(f"\n  ✓ producto '{sku}' creado — aparecerá en el POS en tecla [{orden}]")
+    else:
+        print(f"\n  ✓ producto '{sku}' actualizado")
+
+
+def _editar_producto():
+    from pos_db import get_sku, editar_sku
+
+    print()
+    try:
+        sku = _pedir_sku_c("SKU a editar")
+    except _Cancelado:
+        print("\n  cancelado\n")
+        return
+
+    row = get_sku(sku)
+    if not row:
+        print(f"  ! SKU '{sku}' no existe")
+        return
+
+    print(f"\n  editando: {row['descripcion']}  (${row['precio_venta']:.2f})")
+    print("  Enter para dejar sin cambios en cada campo — Enter en todos = cancelar\n")
+
+    cambios = {}
+
+    nueva_desc = input(f"  descripción [{row['descripcion']}]: ").strip()
+    if nueva_desc:
+        cambios["descripcion"] = nueva_desc
+
+    nuevo_precio = input(f"  precio [{row['precio_venta']:.2f}]: ").strip()
+    if nuevo_precio:
+        try:
+            cambios["precio_venta"] = float(nuevo_precio)
+        except ValueError:
+            print("  ! precio inválido, se ignora")
+
+    nuevo_orden = input(f"  orden menú [{row['orden_menu']}]: ").strip()
+    if nuevo_orden:
+        try:
+            cambios["orden_menu"] = int(nuevo_orden)
+        except ValueError:
+            print("  ! orden inválido, se ignora")
+
+    if not cambios:
+        print("\n  sin cambios — cancelado")
+        return
+
+    print()
+    for k, v in cambios.items():
+        print(f"  {k}: → {v}")
+    if not _confirmar("  ¿aplicar estos cambios?"):
+        print("\n  ✗ cancelado — nada se modificó\n")
+        return
+
+    editar_sku(sku, **cambios)
+    print(f"\n  ✓ '{sku}' actualizado: {list(cambios.keys())}")
+
+
+def _baja_producto():
+    from pos_db import get_sku, desactivar_sku
+
+    print()
+    try:
+        sku = _pedir_sku_c("SKU a desactivar")
+    except _Cancelado:
+        print("\n  cancelado\n")
+        return
+
+    row = get_sku(sku)
+    if not row:
+        print(f"  ! SKU '{sku}' no existe")
+        return
+
+    print(f"\n  producto: {row['descripcion']}  stock actual: {row['stock']}")
+    if not _confirmar(f"  ¿desactivar '{sku}'? (deja de aparecer en POS, historial se conserva)"):
+        print("\n  cancelado\n")
+        return
+
+    try:
+        desactivar_sku(sku)
+        print(f"\n  ✓ '{sku}' desactivado — ya no aparece en el POS")
+    except ValueError as e:
+        print(f"\n  ! {e}")
+
+
+def _reactivar_producto():
+    from pos_db import get_sku, reactivar_sku
+
+    print()
+    try:
+        sku = _pedir_sku_c("SKU a reactivar")
+    except _Cancelado:
+        print("\n  cancelado\n")
+        return
+
+    row = get_sku(sku)
+    if not row:
+        print(f"  ! SKU '{sku}' no existe")
+        return
+
+    if not _confirmar(f"  ¿reactivar '{row['descripcion']}'?"):
+        print("\n  cancelado\n")
+        return
+
+    reactivar_sku(sku)
+    print(f"\n  ✓ '{sku}' reactivado — vuelve a aparecer en el POS")
+
+
+def menu_administracion():
+    while True:
+        _limpiar()
+        _sep()
+        print("  ADMINISTRACIÓN — Catálogo de productos POS")
+        _sep()
+        _mostrar_catalogo()
+        _sep("─")
+        print("  [1] alta de producto nuevo")
+        print("  [2] editar producto")
+        print("  [3] desactivar producto")
+        print("  [4] reactivar producto")
+        print("  [5] volver")
+        print()
+
+        op = input("  opción: ").strip()
+
+        if op == "1":
+            _alta_producto()
+            input("\n  Enter para continuar...")
+        elif op == "2":
+            _editar_producto()
+            input("\n  Enter para continuar...")
+        elif op == "3":
+            _baja_producto()
+            input("\n  Enter para continuar...")
+        elif op == "4":
+            _reactivar_producto()
+            input("\n  Enter para continuar...")
+        elif op == "5":
+            break
+        else:
+            print("  ! opción inválida")
+            input("  Enter para continuar...")
+
+
 # ── FLUJO REGISTRO BATCH CON CORTE ───────────────────────────────────────────
 
 def flujo_registrar_batch():
@@ -245,7 +537,6 @@ def flujo_registrar_batch():
     """
     batch_activo = get_batch_activo()
 
-    # si hay batch activo con ventas pendientes de corte
     if batch_activo and hay_corte_pendiente(batch_activo):
         print()
         _sep("─")
@@ -255,13 +546,11 @@ def flujo_registrar_batch():
         hacer_corte_entre_batches(batch_activo)
         set_batch_activo(None)
 
-    # registrar el batch nuevo
     batch = registrar_batch()
 
     if batch is None:
-        return  # batch descartado
+        return
 
-    # cargar kg_chi del batch al inventario del POS
     try:
         from pos_db import actualizar_stock
         actualizar_stock(
@@ -275,8 +564,6 @@ def flujo_registrar_batch():
     except Exception as e:
         print(f"  ! error cargando stock CHI: {e}")
 
-    # preguntar si abrir el POS para este batch
-   
     print()
     if _confirmar(f"  ¿abrir el POS para el batch #{batch.id}?"):
         set_batch_activo(batch.id)
@@ -287,7 +574,7 @@ def flujo_registrar_batch():
 
 # ── ABRIR POS ─────────────────────────────────────────────────────────────────
 
-def _abrir_pos(batch_id: int):
+def _abrir_pos(batch_id: str):
     """Abre el POS curses para el batch indicado."""
     try:
         from pos_tui import iniciar_pos_tui
@@ -307,8 +594,8 @@ def main():
     while True:
 
         _limpiar()
-        fecha       = fecha_hoy()
-        estado      = _estado_hoy()
+        fecha        = fecha_hoy()
+        estado       = _estado_hoy()
         batch_activo = get_batch_activo()
 
         _sep()
@@ -325,6 +612,7 @@ def main():
         print("  [4] análisis y reportes")
         print("  [5] simulador de escenarios")
         print("  [6] configuración")
+        print("  [7] administración — catálogo POS")
         print()
         print("  [0] salir")
         print()
@@ -341,7 +629,6 @@ def main():
             if batch_activo:
                 _abrir_pos(batch_activo)
             else:
-                # no hay batch activo — preguntar cuál usar
                 fecha   = fecha_hoy()
                 batches = cargar_batches(fecha)
                 if not batches:
@@ -382,6 +669,9 @@ def main():
 
         elif op == "6":
             menu_config()
+
+        elif op == "7":
+            menu_administracion()
 
         elif op == "0":
             print("\n  hasta luego\n")
