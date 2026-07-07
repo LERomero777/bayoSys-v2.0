@@ -9,3 +9,8 @@ build/
 .vscode/
 venv/
 venvclear/
+../..gitignore.swp
+build_monolito.py
+monolito_debug.py
+tracer.py
+../monolito_debug.py

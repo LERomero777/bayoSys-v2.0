@@ -155,9 +155,10 @@ def carga_manual_stock(sku: str, cantidad: float, nota: str = ""):
     """Carga stock manualmente — para chorizo u otros productos."""
     row = get_sku(sku)
     if row is None:
-        raise ErrorPOS(f"SKU '{sku}' no existe")
+        raise ErrorPOS(f"SKU '{sku}' no existe el SKU")
     actualizar_stock(sku, cantidad, tipo="carga", nota=nota)
-    return f"{row['descripcion']}: +{cantidad:.0f} unidades cargadas"
+    signo = "+" if cantidad >= 0 else "" 
+    return f"{row['descripcion']}: {signo}{cantidad:.3f} unidades actualizadas/ajustadas"
 
 
 def cargar_cubetas_produccion(n_cubetas: float):

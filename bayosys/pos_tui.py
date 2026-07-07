@@ -150,9 +150,28 @@ def pedir_float_modal(stdscr, prompt: str, y: int, x: int) -> float:
         sadd(stdscr, y + 1, x, " " * 22)
 
 
-def pedir_int_modal(stdscr, prompt: str, y: int, x: int) -> int:
-    val = pedir_float_modal(stdscr, prompt, y, x)
-    return int(val)
+def pedir_cantidad_ajuste_modal(stdscr, prompt: str, y: int, x: int) -> float:
+    """
+    Pide una cantidad de AJUSTE de inventario con dirección explícita.
+    Primero [+]/[-] para la dirección, luego la magnitud (acepta decimales).
+    Devuelve el valor ya con signo aplicado. Esc en la dirección cancela (0.0).
+    """
+    sadd(stdscr, y, x, "  [+] sumar   [-] restar  ", C_CYAN() | curses.A_BOLD)
+    stdscr.refresh()
+    while True:
+        key = stdscr.getch()
+        if key == ord("+"):
+            signo = 1
+            break
+        elif key == ord("-"):
+            signo = -1
+            break
+        elif key == 27:
+            sadd(stdscr, y, x, " " * 28)
+            return 0.0
+    sadd(stdscr, y, x, " " * 28)
+    magnitud = pedir_float_modal(stdscr, prompt, y, x)
+    return signo * magnitud
 
 
 # ── MENÚ DINÁMICO — construido desde DB ───────────────────────────────────────
@@ -451,10 +470,10 @@ def pantalla_inventario(stdscr):
             skus = [r["sku"] for r in inv if r["tipo_venta"] not in ("libre",)]
             sku_raw = pedir_input(stdscr, "SKU: ", h - 4, 2, 8).upper()
             if sku_raw in skus:
-                cant = pedir_int_modal(stdscr, "Cantidad +: ", h - 4, 12)
-                if cant > 0:
+                delta = pedir_cantidad_ajuste_modal(stdscr, "Cantidad +: ", h - 4, 12)
+                if delta != 0:
                     try:
-                        msg = carga_manual_stock(sku_raw, cant)
+                        msg = carga_manual_stock(sku_raw, delta)
                         flash_msg(stdscr, h, msg)
                     except ErrorPOS as e:
                         flash_msg(stdscr, h, str(e), C_RED())
