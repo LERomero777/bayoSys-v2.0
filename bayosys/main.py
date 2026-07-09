@@ -24,6 +24,7 @@ from analisis import menu_analisis
 from tui import iniciar_tui
 from pos_db import init_db, calcular_corte, guardar_corte
 from guardian import verificar_integridad
+from nuke import factory_reset
 
 # ── HELPERS GENERALES ─────────────────────────────────────────────────────────
 
@@ -613,6 +614,7 @@ def main():
         print("  [5] simulador de escenarios")
         print("  [6] configuración")
         print("  [7] administración — catálogo POS")
+        print("  [8] factory reset")
         print()
         print("  [0] salir")
         print()
@@ -672,6 +674,9 @@ def main():
 
         elif op == "7":
             menu_administracion()
+
+        elif op == "8":
+            factory_reset()
 
         elif op == "0":
             print("\n  hasta luego\n")
