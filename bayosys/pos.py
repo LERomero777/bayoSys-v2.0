@@ -23,7 +23,10 @@ from pos_db import (
     registrar_gasto as db_registrar_gasto,
     get_gastos_dia, get_gastos_batch,
     calcular_corte, guardar_corte,
-    resumen_ventas_dia, formatear_ticket, get_movimientos
+    resumen_ventas_dia, formatear_ticket, get_movimientos,
+    agregar_cliente_mayoreo, get_clientes_mayoreo, get_cliente_mayoreo,
+    crear_pedido_mayoreo, editar_pedido_mayoreo, marcar_pedido_entregado,
+    get_pedidos_pendientes, get_pedidos_dia
 )
 from config import cargar_config, fecha_hoy
 
@@ -390,6 +393,89 @@ def sincronizar_precios_config():
     actualizar_precio("M05",  cfg.precio_mant_lt05)
     actualizar_precio("CUB",  cfg.precio_mant_cub)
 
+# ── MAYOREO ────────────────────────────────────────────────────────────────
+# Los pedidos de mayoreo NO tocan CHI.stock — son informativos.
+# El operador decide en vivo cómo repartir el chicharrón disponible.
+
+def alta_cliente_mayoreo(clave: str, nombre: str, precio_kg: float) -> dict:
+    """Da de alta o actualiza un cliente en el tabulador de mayoreo."""
+    clave = clave.strip().lower().replace(" ", "_")
+    if not clave:
+        raise ErrorPOS("clave de cliente requerida")
+    if not nombre.strip():
+        raise ErrorPOS("nombre requerido")
+    if precio_kg <= 0:
+        raise ErrorPOS("precio debe ser mayor a 0")
+
+    creado = agregar_cliente_mayoreo(clave, nombre.strip(), precio_kg)
+    return dict(
+        clave   = clave,
+        nombre  = nombre.strip(),
+        precio_kg = precio_kg,
+        creado  = creado,
+        mensaje = f"cliente '{nombre}' {'creado' if creado else 'actualizado'} — ${precio_kg:.0f}/kg"
+    )
+
+
+def listar_clientes_mayoreo() -> list:
+    return get_clientes_mayoreo()
+
+
+PRIORIDADES_MAYOREO = ("muy_alta", "alta", "media", "baja")
+
+
+def capturar_pedido_mayoreo(cliente_clave: str, kg: float, fecha_entrega: str,
+                             prioridad: str = "media", nota: str = "") -> dict:
+    """
+    Registra un pedido de mayoreo. No descuenta CHI.stock.
+    Lanza ErrorPOS si el cliente no existe o los datos son inválidos.
+    """
+    if kg <= 0:
+        raise ErrorPOS("kg debe ser mayor a 0")
+    if prioridad not in PRIORIDADES_MAYOREO:
+        raise ErrorPOS(f"prioridad debe ser: {', '.join(PRIORIDADES_MAYOREO)}")
+
+    cliente = get_cliente_mayoreo(cliente_clave)
+    if cliente is None:
+        raise ErrorPOS(f"cliente '{cliente_clave}' no existe — dalo de alta primero")
+
+    pedido_id = crear_pedido_mayoreo(
+        cliente_clave = cliente_clave,
+        kg            = kg,
+        fecha_entrega = fecha_entrega,
+        prioridad     = prioridad,
+        nota          = nota,
+    )
+    total = kg * cliente["precio_kg"]
+    return dict(
+        pedido_id = pedido_id,
+        cliente   = cliente["nombre"],
+        kg        = kg,
+        precio_kg = cliente["precio_kg"],
+        total     = total,
+        prioridad = prioridad,
+        mensaje   = f"pedido #{pedido_id} — {cliente['nombre']}  {kg:.1f}kg  ${total:,.0f}  [{prioridad}]"
+    )
+
+
+def ajustar_pedido_mayoreo(pedido_id: int, nuevo_kg: float) -> dict:
+    """Renegociar kg de un pedido ya tomado, antes de entregar."""
+    if nuevo_kg <= 0:
+        raise ErrorPOS("kg debe ser mayor a 0")
+    editar_pedido_mayoreo(pedido_id, kg=nuevo_kg)
+    return dict(pedido_id=pedido_id, nuevo_kg=nuevo_kg,
+                mensaje=f"pedido #{pedido_id} ajustado a {nuevo_kg:.1f}kg")
+
+
+def entregar_pedido_mayoreo(pedido_id: int) -> dict:
+    marcar_pedido_entregado(pedido_id)
+    return dict(pedido_id=pedido_id, mensaje=f"pedido #{pedido_id} marcado como entregado")
+
+
+def get_pedidos_mayoreo_pendientes() -> list:
+    """Fuente única para el ticker y la pantalla de status — ya vienen
+    ordenados por prioridad desde pos_db."""
+    return get_pedidos_pendientes()
 
 # ── INIT ──────────────────────────────────────────────────────────────────────
 

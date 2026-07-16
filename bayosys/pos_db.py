@@ -118,7 +118,6 @@ CREATE TABLE IF NOT EXISTS gastos (
     descripcion TEXT,
     monto       REAL NOT NULL
 );
-
 -- Cortes de caja
 CREATE TABLE IF NOT EXISTS cortes (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +133,30 @@ CREATE TABLE IF NOT EXISTS cortes (
     fondo_caja          REAL NOT NULL DEFAULT 250.0,
     a_entregar          REAL NOT NULL DEFAULT 0,
     nota                TEXT
+);
+
+-- Tabulador de clientes de mayoreo — precio pactado por cliente
+CREATE TABLE IF NOT EXISTS clientes_mayoreo (
+    clave       TEXT PRIMARY KEY,
+    nombre      TEXT NOT NULL,
+    precio_kg   REAL NOT NULL,
+    activo      INTEGER NOT NULL DEFAULT 1
+);
+
+-- Pedidos de mayoreo — compromisos de entrega, NO descuentan stock.
+-- Son informativos: el operador decide en el momento cómo repartir
+-- el chicharrón disponible usando esto como contexto (prioridad, cliente).
+CREATE TABLE IF NOT EXISTS pedidos_mayoreo (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    fecha_pedido        TEXT NOT NULL,
+    fecha_entrega       TEXT NOT NULL,
+    cliente_clave       TEXT NOT NULL,
+    kg                  REAL NOT NULL,
+    precio_kg_pactado   REAL NOT NULL,
+    prioridad           TEXT NOT NULL DEFAULT 'media',
+    entregado           INTEGER NOT NULL DEFAULT 0,
+    nota                TEXT,
+    FOREIGN KEY (cliente_clave) REFERENCES clientes_mayoreo(clave)
 );
 """
 
@@ -718,6 +741,135 @@ def formatear_ticket(ticket_id: int) -> str:
         lineas.append(f"  CAMBIO:          ${t['cambio']:.2f}")
     lineas.append("================================")
     return "\n".join(lineas)
+
+# ── CLIENTES DE MAYOREO ────────────────────────────────────────────────────────
+
+def agregar_cliente_mayoreo(clave: str, nombre: str, precio_kg: float) -> bool:
+    """
+    Da de alta un cliente de mayoreo en el tabulador.
+    Si ya existe (aunque inactivo), lo reactiva y actualiza precio.
+    Retorna True si fue creado, False si ya existía (actualizado).
+    """
+    with get_conn() as conn:
+        existente = conn.execute(
+            "SELECT clave FROM clientes_mayoreo WHERE clave = ?", (clave,)
+        ).fetchone()
+        if existente:
+            conn.execute("""
+                UPDATE clientes_mayoreo
+                SET nombre = ?, precio_kg = ?, activo = 1
+                WHERE clave = ?
+            """, (nombre, precio_kg, clave))
+            conn.commit()
+            return False
+        else:
+            conn.execute("""
+                INSERT INTO clientes_mayoreo (clave, nombre, precio_kg, activo)
+                VALUES (?, ?, ?, 1)
+            """, (clave, nombre, precio_kg))
+            conn.commit()
+            return True
+
+def get_clientes_mayoreo(solo_activos: bool = True) -> list:
+    with get_conn() as conn:
+        if solo_activos:
+            return conn.execute(
+                "SELECT * FROM clientes_mayoreo WHERE activo = 1 ORDER BY nombre"
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM clientes_mayoreo ORDER BY nombre"
+        ).fetchall()
+
+def get_cliente_mayoreo(clave: str) -> Optional[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM clientes_mayoreo WHERE clave = ?", (clave,)
+        ).fetchone()
+
+
+# ── PEDIDOS DE MAYOREO ──────────────────────────────────────────────────────────
+# NO tocan CHI.stock — son informativos. El operador decide en vivo
+# cómo repartir el chicharrón disponible usando esto como contexto.
+
+_ORDEN_PRIORIDAD = {"muy_alta": 0, "alta": 1, "media": 2, "baja": 3}
+
+def crear_pedido_mayoreo(cliente_clave: str, kg: float, fecha_entrega: str,
+                         prioridad: str = "media", nota: str = "") -> int:
+    if prioridad not in _ORDEN_PRIORIDAD:
+        raise ValueError(f"prioridad inválida: '{prioridad}'")
+
+    cliente = get_cliente_mayoreo(cliente_clave)
+    if cliente is None:
+        raise ValueError(f"cliente '{cliente_clave}' no existe en el tabulador")
+
+    ahora = datetime.now()
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO pedidos_mayoreo
+            (fecha_pedido, fecha_entrega, cliente_clave, kg,
+             precio_kg_pactado, prioridad, nota)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (ahora.strftime("%Y-%m-%d"), fecha_entrega, cliente_clave, kg,
+              cliente["precio_kg"], prioridad, nota))
+        conn.commit()
+        return cur.lastrowid
+
+def editar_pedido_mayoreo(pedido_id: int, kg: float = None,
+                          prioridad: str = None, nota: str = None):
+    """Edita un pedido pendiente — ej. renegociar kg antes de entregar."""
+    campos = {}
+    if kg is not None:
+        campos["kg"] = kg
+    if prioridad is not None:
+        if prioridad not in _ORDEN_PRIORIDAD:
+            raise ValueError(f"prioridad inválida: '{prioridad}'")
+        campos["prioridad"] = prioridad
+    if nota is not None:
+        campos["nota"] = nota
+    if not campos:
+        return
+
+    sets = ", ".join(f"{k} = ?" for k in campos)
+    vals = list(campos.values()) + [pedido_id]
+    with get_conn() as conn:
+        conn.execute(f"UPDATE pedidos_mayoreo SET {sets} WHERE id = ?", vals)
+        conn.commit()
+
+def marcar_pedido_entregado(pedido_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE pedidos_mayoreo SET entregado = 1 WHERE id = ?", (pedido_id,)
+        )
+        conn.commit()
+
+def get_pedidos_pendientes() -> list:
+    """
+    Pedidos no entregados, ordenados por prioridad (muy_alta primero)
+    y luego por fecha de entrega. Fuente única para el ticker y la
+    pantalla de status del menú mayoreo.
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT p.*, c.nombre as cliente_nombre
+            FROM pedidos_mayoreo p
+            JOIN clientes_mayoreo c ON p.cliente_clave = c.clave
+            WHERE p.entregado = 0
+            ORDER BY p.fecha_entrega
+        """).fetchall()
+    return sorted(rows, key=lambda r: _ORDEN_PRIORIDAD.get(r["prioridad"], 9))
+
+def get_pedidos_dia(fecha_pedido: str = None) -> list:
+    """Todos los pedidos tomados en una fecha, entregados o no."""
+    if fecha_pedido is None:
+        fecha_pedido = date.today().isoformat()
+    with get_conn() as conn:
+        return conn.execute("""
+            SELECT p.*, c.nombre as cliente_nombre
+            FROM pedidos_mayoreo p
+            JOIN clientes_mayoreo c ON p.cliente_clave = c.clave
+            WHERE p.fecha_pedido = ?
+            ORDER BY p.id
+        """, (fecha_pedido,)).fetchall()
 
 
 # ── INIT AUTOMÁTICO ───────────────────────────────────────────────────────────

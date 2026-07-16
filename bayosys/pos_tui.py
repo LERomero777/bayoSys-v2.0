@@ -9,10 +9,10 @@ CAMBIOS:
   - El resto del archivo no cambia: flujo_cobro, corte, historial, inventario
 
 Layout:
-  ┌─ PRODUCTOS ──────┬─ TICKET ACTUAL ──────────────────┐
-  │ [1] Chicharrón   │  1.250 kg  Chicharrón   $287.50  │
-  │ [2] Manteca 1lt  │  2 pza     Manteca 1lt   $70.00  │
-  │ [3] Manteca ½lt  │  ──────────────────────────────  │
+  ┌─ PRODUCTOS ──────┬─ TICKET ACTUAL ───────────────────┐
+  │ [1] Chicharrón   │  1.250 kg  Chicharrón   $287.50   │
+  │ [2] Manteca 1lt  │  2 pza     Manteca 1lt   $70.00   │
+  │ [3] Manteca ½lt  │  ──────────────────────────────   │
   │ [4] Chorizo      │  TOTAL               $357.50      │
   │ [5] Cubeta       │                                   │
   │ [N] + Artículo   │                                   │
@@ -33,7 +33,10 @@ from pos import (
     agregar_producto_precio_variable, agregar_articulo_libre,
     cobrar, hacer_corte, registrar_gasto, abrir_cubeta_pos,
     carga_manual_stock, get_estado_inventario, get_resumen_turno,
-    get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS
+    get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS,
+    alta_cliente_mayoreo, listar_clientes_mayoreo, capturar_pedido_mayoreo,
+    ajustar_pedido_mayoreo, entregar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
+    PRIORIDADES_MAYOREO
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy
@@ -149,6 +152,21 @@ def pedir_float_modal(stdscr, prompt: str, y: int, x: int) -> float:
         curses.napms(800)
         sadd(stdscr, y + 1, x, " " * 22)
 
+def pedir_int_modal(stdscr, prompt: str, y: int, x: int) -> int:
+    val = pedir_float_modal(stdscr, prompt, y, x)
+    return int(val)
+
+def _modal_bloqueante(stdscr, fn, *args, **kwargs):
+    """
+    Ejecuta fn con timeout desactivado (getch() bloquea indefinido),
+    y restaura el timeout del ticker (150ms) al salir, incluso si fn
+    lanza una excepción — para que el ticker nunca quede huérfano.
+    """
+    stdscr.timeout(-1)
+    try:
+        return fn(stdscr, *args, **kwargs)
+    finally:
+        stdscr.timeout(150)
 
 def pedir_cantidad_ajuste_modal(stdscr, prompt: str, y: int, x: int) -> float:
     """
@@ -244,7 +262,8 @@ def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, menu: list, msg: str 
     sadd(win, y, 6, "Inventario",       C_NORM()); y += 1
     sadd(win, y, 2, "[H]", C_CYAN()   | curses.A_BOLD)
     sadd(win, y, 6, "Historial",        C_NORM()); y += 1
-
+    sadd(win, y, 2, "[M]", C_YELLOW() | curses.A_BOLD)
+    sadd(win, y, 6, "Mayoreo",          C_NORM()); y += 1
     hline(win, y, 1, w - 2); y += 1
 
     sadd(win, y, 2, "[C]", C_YELLOW() | curses.A_BOLD)
@@ -513,6 +532,124 @@ def pantalla_historial(stdscr):
         if key in (27, ord("q"), ord("Q")):
             break
 
+# ── PANTALLA PEDIDOS DE MAYOREO ──────────────────────────────────────────────
+
+_COLOR_PRIORIDAD = {
+    "muy_alta": lambda: C_RED()   | curses.A_BOLD,
+    "alta":     lambda: C_YELLOW() | curses.A_BOLD,
+    "media":    lambda: C_YELLOW(),
+    "baja":     lambda: C_CYAN(),
+}
+
+def pantalla_status_pedidos(stdscr):
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    sadd(stdscr, 0, 0, " PEDIDOS DE MAYOREO — PENDIENTES ".center(w), C_TITLE())
+    hline(stdscr, 1, 0, w)
+
+    pedidos = get_pedidos_mayoreo_pendientes()
+
+    if not pedidos:
+        sadd(stdscr, 3, 2, "  sin pedidos pendientes", C_NORM())
+    else:
+        sadd(stdscr, 2, 2,
+             f"{'#':>4}  {'prioridad':<9}  {'cliente':<16}  {'kg':>6}  {'precio':>8}  {'total':>9}  entrega",
+             C_CYAN())
+        hline(stdscr, 3, 2, w - 4)
+
+        for i, p in enumerate(pedidos[: h - 6]):
+            y     = 4 + i
+            color = _COLOR_PRIORIDAD.get(p["prioridad"], lambda: C_NORM())()
+            total = p["kg"] * p["precio_kg_pactado"]
+            sadd(stdscr, y, 2,
+                 f"{p['id']:>4}  {p['prioridad']:<9}  {p['cliente_nombre'][:16]:<16}  "
+                 f"{p['kg']:>5.1f}k  ${p['precio_kg_pactado']:>6.0f}  "
+                 f"${total:>8.0f}  {p['fecha_entrega']}",
+                 color)
+
+    hline(stdscr, h - 3, 0, w)
+    sadd(stdscr, h - 2, 2, "[Esc] volver", C_NORM())
+    stdscr.refresh()
+
+    while True:
+        key = stdscr.getch()
+        if key in (27, ord("q"), ord("Q")):
+            break
+
+# ── FLUJOS DE CAPTURA — MAYOREO ──────────────────────────────────────────────
+
+def flujo_alta_cliente_mayoreo(stdscr) -> str:
+    """Da de alta un cliente nuevo en el tabulador de mayoreo."""
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    sadd(stdscr, h // 2 - 4, w // 2 - 16, "NUEVO CLIENTE MAYOREO", C_TITLE())
+    stdscr.refresh()
+
+    nombre = pedir_input(stdscr, "nombre: ", h // 2 - 2, w // 2 - 16, 25)
+    if not nombre:
+        return ""
+    precio = pedir_float_modal(stdscr, "precio $/kg: ", h // 2 - 1, w // 2 - 16)
+    if precio <= 0:
+        return ""
+
+    try:
+        r = alta_cliente_mayoreo(nombre, nombre, precio)
+        return r["mensaje"]
+    except ErrorPOS as e:
+        return f"! {e}"
+
+
+def flujo_capturar_pedido_mayoreo(stdscr) -> str:
+    """Captura un pedido de mayoreo — no descuenta stock, solo informa."""
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    clientes = listar_clientes_mayoreo()
+
+    if not clientes:
+        sadd(stdscr, h // 2, w // 2 - 20,
+             "  sin clientes — dalos de alta primero  ", C_RED())
+        stdscr.refresh()
+        stdscr.getch()
+        return ""
+
+    sadd(stdscr, 0, 0, " CAPTURAR PEDIDO — MAYOREO ".center(w), C_TITLE())
+    hline(stdscr, 1, 0, w)
+    for i, c in enumerate(clientes[:9]):
+        sadd(stdscr, 3 + i, 2,
+             f"[{i+1}] {c['nombre']:<20}  ${c['precio_kg']:.0f}/kg", C_NORM())
+    stdscr.refresh()
+
+    tecla_key = stdscr.getch()
+    idx = _tecla_a_idx(tecla_key)
+    if not (0 <= idx < len(clientes)):
+        return ""
+    cliente = clientes[idx]
+
+    my = 4 + len(clientes[:9]) + 1
+    kg = pedir_float_modal(stdscr, "kg del pedido: ", my, 2)
+    if kg <= 0:
+        return ""
+
+    fecha_entrega = pedir_input(stdscr, "entrega (AAAA-MM-DD, Enter=mañana): ",
+                                 my + 1, 2, 12)
+    if not fecha_entrega:
+        from datetime import date, timedelta
+        fecha_entrega = (date.today() + timedelta(days=1)).isoformat()
+
+    sadd(stdscr, my + 2, 2,
+         "prioridad: [1]muy_alta [2]alta [3]media [4]baja", C_CYAN())
+    stdscr.refresh()
+    p_key = stdscr.getch()
+    prioridad = {
+        ord("1"): "muy_alta", ord("2"): "alta",
+        ord("3"): "media",    ord("4"): "baja",
+    }.get(p_key, "media")
+
+    try:
+        r = capturar_pedido_mayoreo(cliente["clave"], kg, fecha_entrega, prioridad)
+        return r["mensaje"]
+    except ErrorPOS as e:
+        return f"! {e}"
 
 # ── PANTALLA CORTE ────────────────────────────────────────────────────────────
 
@@ -565,10 +702,26 @@ def pantalla_corte(stdscr, sesion: SesionPOS) -> str:
         elif key == 27:
             return ""
 
+# ── TICKER DE PEDIDOS DE MAYOREO ──────────────────────────────────────────────
+
+def _texto_ticker_mayoreo() -> str:
+    """Arma el texto completo del ticker a partir de pedidos pendientes,
+    ordenados por prioridad (ya vienen así desde get_pedidos_mayoreo_pendientes)."""
+    pedidos = get_pedidos_mayoreo_pendientes()
+    if not pedidos:
+        return "  sin pedidos de mayoreo pendientes  »  "
+
+    marcador = {"muy_alta": "●●●", "alta": "●●", "media": "●", "baja": "·"}
+    partes = []
+    for p in pedidos:
+        total = p["kg"] * p["precio_kg_pactado"]
+        m = marcador.get(p["prioridad"], "")
+        partes.append(f"{m} {p['cliente_nombre']} — {p['kg']:.1f}kg — ${total:,.0f}")
+    return "   »   ".join(partes) + "   »   "
 
 # ── BARRA DE ESTADO ───────────────────────────────────────────────────────────
 
-def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = ""):
+def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = "", ticker_offset: int = 0):
     h, w = stdscr.getmaxyx()
     try:
         resumen = get_resumen_turno(sesion.batch_id)
@@ -584,10 +737,20 @@ def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = ""):
     sadd(stdscr, h - 1, 0, " " * (w - 1), C_TAB())
     sadd(stdscr, h - 1, 0, status[:w - 1], C_TAB())
 
+    # ── ticker de mayoreo — pinta en el espacio libre a la derecha del status ──
+    ticker_x = len(status) + 3
+    if ticker_x < w - 5:
+        ancho_ticker = w - ticker_x - 1
+        texto = _texto_ticker_mayoreo()
+        # duplicar el texto para que el scroll se vea continuo (loop sin cortes)
+        doble = texto * (ancho_ticker // max(len(texto), 1) + 3)
+        offset = ticker_offset % len(texto) if texto else 0
+        visible = doble[offset: offset + ancho_ticker]
+        sadd(stdscr, h - 1, ticker_x, visible, C_TAB() | curses.A_BOLD)
+
     if msg:
         sadd(stdscr, h - 2, 0, " " * (w - 1))
         sadd(stdscr, h - 2, 2, f" {msg[:w-6]} ", C_GREEN())
-
 
 # ── HANDLER DINÁMICO POR tipo_venta ──────────────────────────────────────────
 
@@ -655,10 +818,10 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
     curses.curs_set(0)
     stdscr.keypad(True)
     init_colors()
-
+    stdscr.timeout(150) # getch() regresa -1 si no hay tecla en 150ms - permite animar el ticker
     sesion = iniciar_pos(batch_id=batch_id, operador=operador)
-    msg    = f"POS iniciado — batch#{batch_id}"
-
+    msg    = f"BayoPOS iniciado — batch#{batch_id}"
+    ticker_offset = 0
     while True:
         h, w = stdscr.getmaxyx()
         stdscr.erase()
@@ -679,7 +842,8 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
 
         draw_panel_izq(win_izq, sesion, inv_dict, menu)
         draw_panel_ticket(win_der, sesion)
-        draw_statusbar(stdscr, sesion, msg)
+        draw_statusbar(stdscr, sesion, msg, ticker_offset)
+        ticker_offset += 1
         stdscr.refresh()
         msg = ""
 
@@ -753,6 +917,29 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
         elif key in (ord("h"), ord("H")):
             pantalla_historial(stdscr)
 
+        # ── MAYOREO ───────────────────────────────────────────────────
+        elif key in (ord("m"), ord("M")):
+            def _submenu_mayoreo(stdscr):
+                h2, w2 = stdscr.getmaxyx()
+                stdscr.erase()
+                sadd(stdscr, h2 // 2 - 3, w2 // 2 - 16, "MENÚ MAYOREO", C_TITLE())
+                sadd(stdscr, h2 // 2 - 1, w2 // 2 - 16, "[1] nuevo cliente", C_CYAN())
+                sadd(stdscr, h2 // 2,     w2 // 2 - 16, "[2] capturar pedido", C_CYAN())
+                sadd(stdscr, h2 // 2 + 1, w2 // 2 - 16, "[3] status de pedidos", C_CYAN())
+                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[Esc] volver", C_NORM())
+                stdscr.refresh()
+                sub_key = stdscr.getch()
+                if sub_key == ord("1"):
+                    return flujo_alta_cliente_mayoreo(stdscr)
+                elif sub_key == ord("2"):
+                    return flujo_capturar_pedido_mayoreo(stdscr)
+                elif sub_key == ord("3"):
+                    pantalla_status_pedidos(stdscr)
+                return ""
+            resultado = _modal_bloqueante(stdscr, _submenu_mayoreo)
+            if resultado:
+                msg = resultado
+
         # ── CORTE ─────────────────────────────────────────────────────
         elif key in (ord("c"), ord("C")):
             resultado = pantalla_corte(stdscr, sesion)
@@ -766,10 +953,8 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
             else:
                 break
 
-
 def iniciar_pos_tui(batch_id: str, operador: str = "Luis"):
     curses.wrapper(main, batch_id, operador)
-
 
 if __name__ == "__main__":
     iniciar_pos_tui(batch_id="test")
