@@ -31,8 +31,8 @@ import os
 from pos import (
     iniciar_pos, agregar_chicharron, agregar_producto,
     agregar_producto_precio_variable, agregar_articulo_libre,
-    cobrar, hacer_corte, registrar_gasto, abrir_cubeta_pos,
-    carga_manual_stock, get_estado_inventario, get_resumen_turno,
+    cobrar, hacer_corte, registrar_gasto, abrir_cubeta_pos, litrear_pos,
+    carga_manual_stock, get_estado_inventario, get_resumen_turno, get_pool_lt,
     get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS,
     alta_cliente_mayoreo, listar_clientes_mayoreo, capturar_pedido_mayoreo,
     ajustar_pedido_mayoreo, entregar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
@@ -40,6 +40,7 @@ from pos import (
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy, cargar_config
+from models import LT_POR_CUBETA
 
 try:
     from pos_ticket import imprimir_ticket_fisico, ErrorImpresora
@@ -307,6 +308,8 @@ def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, menu: list, msg: str 
     sadd(win, y, 6, "Registrar gasto",  C_NORM()); y += 1
     sadd(win, y, 2, "[A]", C_YELLOW() | curses.A_BOLD)
     sadd(win, y, 6, "Abrir cubeta",     C_NORM()); y += 1
+    sadd(win, y, 2, "[L]", C_YELLOW() | curses.A_BOLD)
+    sadd(win, y, 6, f"Litrear {get_pool_lt():.1f}lt", C_NORM()); y += 1
     sadd(win, y, 2, "[I]", C_CYAN()   | curses.A_BOLD)
     sadd(win, y, 6, "Inventario",       C_NORM()); y += 1
     sadd(win, y, 2, "[H]", C_CYAN()   | curses.A_BOLD)
@@ -529,9 +532,22 @@ def pantalla_inventario(stdscr):
              f"{stock_str:>7}  ${row['precio_venta']:>9.2f}",
              color if tipo != "libre" else C_NORM())
 
+    # manteca a granel — la cubeta fraccionada que dejó la producción
+    pool = get_pool_lt()
+    y_pool = 4 + len(inv) + 1
+    hline(stdscr, y_pool, 2, w - 4)
+    sadd(stdscr, y_pool + 1, 2,
+         f"{'GRANEL':<8} {'Manteca a granel':<20} {'pool':<10} "
+         f"{pool:>4.2f} lt",
+         C_GREEN() if pool > 0 else C_NORM())
+    sadd(stdscr, y_pool + 2, 2,
+         f"         faltan {max(0.0, LT_POR_CUBETA - pool):.2f} lt para completar cubeta",
+         C_NORM())
+
     hline(stdscr, h - 3, 0, w)
     sadd(stdscr, h - 2, 2,
-         "[C] carga manual   [A] abrir cubeta   [Esc] volver", C_NORM())
+         "[C] carga manual   [A] abrir cubeta   [L] litrear granel   [Esc] volver",
+         C_NORM())
     stdscr.refresh()
 
     while True:
@@ -550,7 +566,23 @@ def pantalla_inventario(stdscr):
                     except ErrorPOS as e:
                         flash_msg(stdscr, h, str(e), C_RED())
             break
-        elif key in (ord("a"), ord("A")):
+        elif key in (ord("a"), ord("A"), ord("l"), ord("L")):
+            # [A] rompe una cubeta sellada; [L] envasa del granel que ya está abierto
+            desde_cubeta = key in (ord("a"), ord("A"))
+
+            def _pedir_envases(stdscr):
+                e1  = pedir_int_modal(stdscr, "envases 1lt: ", h - 4, 2)
+                e05 = pedir_int_modal(stdscr, "envases ½lt: ", h - 4, 24)
+                return e1, e05
+
+            e1, e05 = _modal_bloqueante(stdscr, _pedir_envases)
+            if e1 > 0 or e05 > 0:
+                try:
+                    r = (abrir_cubeta_pos(e1, e05) if desde_cubeta
+                         else litrear_pos(e1, e05))
+                    flash_msg(stdscr, h, r["mensaje"])
+                except ErrorPOS as e:
+                    flash_msg(stdscr, h, str(e), C_RED())
             break
 
 
@@ -956,13 +988,19 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
                 except ErrorPOS as e:
                     msg = f"! {e}"
 
-        # ── ABRIR CUBETA ──────────────────────────────────────────────
-        elif key in (ord("a"), ord("A")):
+        # ── ABRIR CUBETA / LITREAR GRANEL ─────────────────────────────
+        # [A] rompe una cubeta sellada; [L] envasa de la que ya está abierta
+        elif key in (ord("a"), ord("A"), ord("l"), ord("L")):
+            desde_cubeta = key in (ord("a"), ord("A"))
+            pool  = get_pool_lt()
+            rotulo = "ABRIR CUBETA" if desde_cubeta else f"LITREAR GRANEL ({pool:.2f} lt)"
+            sadd(stdscr, h // 2 - 1, w // 2 - 16, rotulo, C_TITLE())
             e1  = pedir_int_modal(stdscr, "envases 1lt a cargar: ",  h // 2,     w // 2 - 16)
             e05 = pedir_int_modal(stdscr, "envases ½lt a cargar: ",  h // 2 + 1, w // 2 - 16)
             if e1 > 0 or e05 > 0:
                 try:
-                    r   = abrir_cubeta_pos(e1, e05)
+                    r   = (abrir_cubeta_pos(e1, e05) if desde_cubeta
+                           else litrear_pos(e1, e05))
                     msg = r["mensaje"]
                 except ErrorPOS as e:
                     msg = f"! {e}"

@@ -17,7 +17,9 @@ from datetime import datetime
 
 from pos_db import (
     init_db, get_inventario, get_sku, actualizar_stock,
-    actualizar_precio, agregar_sku, abrir_cubeta,
+    actualizar_precio, agregar_sku, abrir_cubeta, litrear_de_pool,
+    cargar_produccion_batch, get_pool_manteca, get_pool_historial,
+    ajustar_pool_manteca,
     crear_ticket, anular_ticket, marcar_impreso,
     get_tickets_dia, get_ticket_items,
     registrar_gasto as db_registrar_gasto,
@@ -139,22 +141,51 @@ def validar_cubeta_stock(cantidad: float = 1):
 
 def abrir_cubeta_pos(env_1lt: int, env_05lt: int, nota: str = "") -> dict:
     """
-    Abre una cubeta para litrear.
+    Abre una cubeta sellada para litrear.
     Valida que haya cubetas en bodega.
-    Retorna resumen de la operación.
+    Lo que no se envasa se queda en el pool, no se pierde.
     """
     validar_cubeta_stock()
     if env_1lt == 0 and env_05lt == 0:
         raise ErrorPOS("debes especificar al menos un envase")
 
-    lt_cargados = env_1lt * 1.0 + env_05lt * 0.5
-    abrir_cubeta(env_1lt, env_05lt, nota)
+    try:
+        r = abrir_cubeta(env_1lt, env_05lt, nota)
+    except ValueError as e:
+        raise ErrorPOS(str(e))
 
     return dict(
-        env_1lt    = env_1lt,
-        env_05lt   = env_05lt,
-        lt_cargados= lt_cargados,
-        mensaje    = f"cubeta abierta — {env_1lt}×1lt  {env_05lt}×½lt  ({lt_cargados:.1f}lt al inventario)",
+        env_1lt     = env_1lt,
+        env_05lt    = env_05lt,
+        lt_cargados = r["lt_envasados"],
+        pool_lt     = r["pool_despues"],
+        mensaje     = (f"cubeta abierta — {env_1lt}×1lt  {env_05lt}×½lt  "
+                       f"({r['lt_envasados']:.1f}lt envasados, "
+                       f"{r['pool_despues']:.2f}lt a granel)"),
+    )
+
+
+def litrear_pos(env_1lt: int, env_05lt: int, nota: str = "") -> dict:
+    """
+    Envasa manteca de la cubeta ya abierta, sin romper una sellada.
+    Es la salida del remanente que dejó la producción.
+    """
+    if env_1lt == 0 and env_05lt == 0:
+        raise ErrorPOS("debes especificar al menos un envase")
+
+    try:
+        r = litrear_de_pool(env_1lt, env_05lt, nota)
+    except ValueError as e:
+        raise ErrorPOS(str(e))
+
+    return dict(
+        env_1lt     = env_1lt,
+        env_05lt    = env_05lt,
+        lt_cargados = r["lt_envasados"],
+        pool_lt     = r["pool_despues"],
+        mensaje     = (f"litreado — {env_1lt}×1lt  {env_05lt}×½lt  "
+                       f"({r['lt_envasados']:.1f}lt) · quedan "
+                       f"{r['pool_despues']:.2f}lt a granel"),
     )
 
 
@@ -168,13 +199,52 @@ def carga_manual_stock(sku: str, cantidad: float, nota: str = ""):
     return f"{row['descripcion']}: {signo}{cantidad:.3f} unidades actualizadas/ajustadas"
 
 
-def cargar_cubetas_produccion(n_cubetas: float):
+def cargar_produccion(batch, cfg) -> dict:
     """
-    Registra cubetas producidas en el día — las sube al stock CUB.
-    Se llama desde el cierre de producción.
+    Sube al POS lo que produjo un batch recién registrado:
+    el chicharrón a CHI y la manteca al pool, que emite cubetas completas a CUB.
+
+    Un batch de 30 kg da ~1.15 cubetas: entra 1 al inventario y 0.15 queda
+    flotando para el siguiente. Nunca se sube una cubeta fraccionada — no
+    existe media cubeta que vender.
     """
-    actualizar_stock("CUB", n_cubetas, tipo="carga",
-                     referencia="produccion", nota="cubetas del día")
+    from calcular import calcular_batch
+
+    r = calcular_batch(batch, cfg, n_batches=1)
+    res = cargar_produccion_batch(
+        batch_id   = batch.id,
+        kg_chi     = batch.kg_chi,
+        lt_manteca = r.lt_mant,
+    )
+
+    if res["ya_cargado"]:
+        res["mensaje"] = f"batch {batch.id} ya estaba cargado al inventario"
+    else:
+        partes = [f"{batch.kg_chi:.2f}kg chicharrón"]
+        if res["cubetas_emitidas"] > 0:
+            partes.append(f"{res['cubetas_emitidas']:.0f} cubeta"
+                          f"{'s' if res['cubetas_emitidas'] != 1 else ''}")
+        partes.append(f"{res['pool_despues']:.2f}lt a granel")
+        res["mensaje"] = " · ".join(partes)
+
+    return res
+
+
+def get_pool_lt() -> float:
+    """Litros de manteca a granel — la cubeta fraccionada en curso."""
+    return get_pool_manteca()
+
+
+def get_pool_movimientos(limit: int = 30) -> list:
+    return get_pool_historial(limit)
+
+
+def ajustar_pool(nuevo_saldo: float, nota: str = "") -> dict:
+    """Cuadra el pool contra el conteo físico de bodega."""
+    try:
+        return ajustar_pool_manteca(nuevo_saldo, nota)
+    except ValueError as e:
+        raise ErrorPOS(str(e))
 
 
 # ── FLUJO DE TICKET ───────────────────────────────────────────────────────────

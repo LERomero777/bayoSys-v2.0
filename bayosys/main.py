@@ -552,17 +552,18 @@ def flujo_registrar_batch():
         return
 
     try:
-        from pos_db import actualizar_stock
-        actualizar_stock(
-            sku        = "CHI",
-            delta      = batch.kg_chi,
-            tipo       = "produccion",
-            referencia = f"batch#{batch.id}",
-            nota       = f"{batch.kg_chi}kg — {batch.proveedor}"
-        )
-        print(f"  ✓ {batch.kg_chi}kg de chicharrón cargados al inventario POS")
+        from pos import cargar_produccion
+        res = cargar_produccion(batch, cargar_config())
+        print(f"  ✓ inventario POS: {res['mensaje']}")
+        if res["cubetas_emitidas"] > 0:
+            print(f"    {res['pool_antes']:.2f}lt acumulados + {res['lt_ingresados']:.2f}lt "
+                  f"del batch → {res['cubetas_emitidas']:.0f} cubeta"
+                  f"{'s' if res['cubetas_emitidas'] != 1 else ''} completa"
+                  f"{'s' if res['cubetas_emitidas'] != 1 else ''} a bodega")
+        else:
+            print(f"    {res['pool_despues']:.2f}lt a granel — aún no completa una cubeta")
     except Exception as e:
-        print(f"  ! error cargando stock CHI: {e}")
+        print(f"  ! error cargando producción al POS: {e}")
 
     print()
     if _confirmar(f"  ¿abrir el POS para el batch #{batch.id}?"):
