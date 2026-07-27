@@ -18,7 +18,6 @@ from datetime import date, timedelta, datetime
 from config import cargar_batches, fechas_con_registro, fecha_hoy, cargar_config
 from cierre import cargar_cierre
 from pos_db import tiene_corte_guardado, calcular_corte, guardar_corte
-from calcular import calcular_dia, calcular_ing_manteca_real
 
 
 # ── COLORES ANSI (Dead Space — sin curses, output directo) ───────────────────

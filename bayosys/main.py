@@ -122,9 +122,8 @@ def _estado_hoy() -> str:
     estado = f"{len(batches)} batch(es)  chi:{rd.kg_chi_dia:.1f}kg"
 
     if cierre:
-        from calcular import calcular_ing_manteca_real
-        ing_chi   = (cierre.chi_pub_kg * cfg.precio_chi_pub +
-                     cierre.chi_may_kg * cfg.precio_chi_may)
+        from calcular import calcular_ing_manteca_real, calcular_ing_chi_real
+        ing_chi   = calcular_ing_chi_real(cierre, cfg)["ing_chi_real"]
         mr        = calcular_ing_manteca_real(cierre, cfg)
         ing_total = ing_chi + mr["ing_mant_real"]
         utilidad  = ing_total - rd.c_total_dia

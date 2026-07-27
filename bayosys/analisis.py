@@ -14,7 +14,10 @@ from config import (
     cargar_config, cargar_batches,
     fechas_con_registro
 )
-from calcular import calcular_dia, comparar_proveedores, calcular_ing_manteca_real
+from calcular import (
+    calcular_dia, comparar_proveedores,
+    calcular_ing_manteca_real, calcular_ing_chi_real
+)
 from models import DENSIDAD_MANTECA, LT_POR_CUBETA
 
 
@@ -62,10 +65,13 @@ def mostrar_dia(fecha: str):
     cierre = cargar_cierre(fecha)
 
     # gas del día — solo si hay cierre
-    c_gas_dia = 0.0
-    # TODO: cuando cierre guarde c_gas_dia, leerlo aquí
+    c_gas_dia = cierre.c_gas_dia if cierre else 0.0
 
     r = calcular_dia(batches, cfg, c_gas_dia)
+
+    # ingresos reales — calculados una sola vez, reusados en ambas secciones
+    mr_mant = calcular_ing_manteca_real(cierre, cfg) if cierre else None
+    mr_chi  = calcular_ing_chi_real(cierre, cfg)     if cierre else None
 
     _titulo(f"RESUMEN DÍA — {fecha}  ({r.n_batches} batches)")
 
@@ -127,7 +133,7 @@ def mostrar_dia(fecha: str):
     # ── canales manteca ──────────────────────────────────────────────
     _subtitulo("CANALES — MANTECA")
     if cierre:
-        mr = calcular_ing_manteca_real(cierre, cfg)
+        mr = mr_mant
         p_lt1_lt  = cfg.precio_mant_lt1   / 1.0    # ya es $/lt
         p_lt05_lt = cfg.precio_mant_lt05  / 0.5    # normalizado a $/lt
         p_cub_lt  = cfg.precio_mant_cub   / LT_POR_CUBETA
@@ -161,9 +167,8 @@ def mostrar_dia(fecha: str):
     # ── resultado ────────────────────────────────────────────────────
     _subtitulo("RESULTADO")
     if cierre:
-        mr = calcular_ing_manteca_real(cierre, cfg)
-        ing_chi_real = (cierre.chi_pub_kg * cfg.precio_chi_pub +
-                        cierre.chi_may_kg * cfg.precio_chi_may)
+        mr = mr_mant
+        ing_chi_real = mr_chi["ing_chi_real"]
         ing_total    = ing_chi_real + mr["ing_mant_real"]
         utilidad     = ing_total - r.c_total_dia
         _fila("ingreso chicharrón", f"${ing_chi_real:,.2f}", "(real)")
@@ -184,13 +189,14 @@ def mostrar_dia(fecha: str):
     elif utilidad < 800: util_str += "  ! BAJO"
     else:               util_str += "  ✓"
     _fila("UTILIDAD",       util_str)
-    _fila("proy. mensual",  f"${utilidad * 25:,.2f}", "(× 25 días)")
+    _fila("proy. mensual",  f"${utilidad * cfg.dias_laborales_mes:,.2f}",
+          f"(× {cfg.dias_laborales_mes:.0f} días)")
 
     # ── precios recomendados ─────────────────────────────────────────
     _subtitulo("PRECIOS RECOMENDADOS — CHICHARRÓN")
     _fila("mínimo (break-even)", f"${r.precio_min_chi:.2f}/kg")
-    _fila("justo  (35% margen)", f"${r.precio_justo_chi:.2f}/kg")
-    _fila("premium (55% margen)",f"${r.precio_prem_chi:.2f}/kg")
+    _fila(f"justo  ({cfg.margen_justo_pct:.0f}% margen)", f"${r.precio_justo_chi:.2f}/kg")
+    _fila(f"premium ({cfg.margen_premium_pct:.0f}% margen)",f"${r.precio_prem_chi:.2f}/kg")
     actual = cfg.precio_chi_pub
     if actual < r.precio_min_chi:
         print(f"\n  !! ALERTA: precio actual ${actual} está BAJO el costo real")
@@ -232,11 +238,19 @@ def mostrar_historico(n_dias: int = 7):
 
 # ── COMPARATIVO DE PROVEEDORES ────────────────────────────────────────────────
 
-def mostrar_proveedores():
-    fechas = fechas_con_registro()
-    if not fechas:
+def mostrar_proveedores(n_dias: int = 90):
+    """
+    n_dias: cuántos días recientes considerar (default 90).
+    Evita releer TODO el historial de archivos JSON en cada consulta —
+    con meses/años de operación esa lectura crecería sin límite.
+    Pasa n_dias=None para forzar el histórico completo.
+    """
+    todas_fechas = fechas_con_registro()
+    if not todas_fechas:
         print("\n  sin registros para comparar")
         return
+
+    fechas = todas_fechas if n_dias is None else todas_fechas[-n_dias:]
 
     todos_batches = []
     for fecha in fechas:
@@ -244,6 +258,9 @@ def mostrar_proveedores():
 
     if not todos_batches:
         return
+
+    if len(fechas) < len(todas_fechas):
+        print(f"\n  (mostrando últimos {len(fechas)} de {len(todas_fechas)} días con registro)")
 
     comp = comparar_proveedores(todos_batches)
 

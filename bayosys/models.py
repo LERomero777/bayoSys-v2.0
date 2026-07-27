@@ -169,6 +169,7 @@ class CierreDia:
     stock_cubetas: float        # cubetas en bodega al cierre
 
     observaciones: str = ""
+    c_gas_dia: float = 0.0     # costo real del ticket de gasera ese día
 
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
@@ -202,6 +203,12 @@ class Config:
     # mix chicharrón para proyección en analisis/simulador
     mix_chi_pub_pct: float = 30.0
     # mix manteca — eliminado, se captura en cierre real
+
+    # política de pricing / proyección — decisión de negocio, no medición física
+    margen_justo_pct:   float = 35.0   # precio_justo = costo / (1 - margen_justo_pct/100)
+    margen_premium_pct: float = 55.0   # precio_premium = costo / (1 - margen_premium_pct/100)
+    dias_laborales_mes: float = 25     # días hábiles/mes para proyectar utilidad mensual
+    merma_alerta_pct:   float = 20.0   # merma arriba de esto se loguea como alerta
 
     def __post_init__(self):
         self.beta = round(1.0 - self.alpha, 10)

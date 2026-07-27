@@ -16,11 +16,11 @@ from dataclasses import dataclass, asdict
 from typing import List
 
 from config import fecha_hoy, BASE_DIR
-from calcular import calcular_dia, calcular_ing_manteca_real
+from calcular import calcular_dia, calcular_ing_manteca_real, calcular_ing_chi_real
 from config import cargar_batches, cargar_config
 from models import (
     CierreDia, VentaCubeta, VentaLitreada,
-    LT_POR_ENV_1LT, LT_POR_ENV_05LT
+    LT_POR_ENV_1LT, LT_POR_ENV_05LT, LT_POR_CUBETA
 )
 
 
@@ -191,7 +191,7 @@ def registrar_cierre():
     # NOTA: lt_litreada_usado sale del mismo pool lt_mant_dia
     #       hay que restar esos litros antes de convertir a cubetas
     lt_para_cubetas   = rd.lt_mant_dia - lt_litreada_usado
-    cub_de_hoy        = max(0.0, lt_para_cubetas / 19.0)
+    cub_de_hoy        = max(0.0, lt_para_cubetas / LT_POR_CUBETA)
     cub_disponibles   = stock_cub_ayer + cub_de_hoy
 
     print(f"\n  CUBETAS  ({cub_disponibles:.2f} disponibles después de litreada)")
@@ -226,10 +226,12 @@ def registrar_cierre():
         ventas_cubeta     = ventas_cubeta,
         stock_cubetas     = round(stock_cubetas_final, 2),
         observaciones     = obs,
+        c_gas_dia         = c_gas_dia,
     )
 
     # ── resumen ───────────────────────────────────────────────────────
-    ing_chi   = chi_pub_kg * cfg.precio_chi_pub + chi_may_kg * cfg.precio_chi_may
+    chi_real  = calcular_ing_chi_real(cierre, cfg)
+    ing_chi   = chi_real["ing_chi_real"]
     mant_real = calcular_ing_manteca_real(cierre, cfg)
     ing_total = ing_chi + mant_real["ing_mant_real"]
     utilidad  = ing_total - rd.c_total_dia
