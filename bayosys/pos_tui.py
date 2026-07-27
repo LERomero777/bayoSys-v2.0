@@ -39,7 +39,7 @@ from pos import (
     PRIORIDADES_MAYOREO
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
-from config import fecha_hoy
+from config import fecha_hoy, cargar_config
 
 try:
     from pos_ticket import imprimir_ticket_fisico, ErrorImpresora
@@ -155,6 +155,45 @@ def pedir_float_modal(stdscr, prompt: str, y: int, x: int) -> float:
 def pedir_int_modal(stdscr, prompt: str, y: int, x: int) -> int:
     val = pedir_float_modal(stdscr, prompt, y, x)
     return int(val)
+
+
+def pedir_kg_o_monto_modal(stdscr, nombre: str, precio_kg: float, y: int, x: int) -> tuple:
+    """
+    Doble entrada para productos por peso (chicharrón): kg y monto ($)
+    se muestran juntos — llenar uno calcula el otro con precio_kg.
+    Enter vacío (o Esc) en 'kg' pasa el turno a 'monto'; vacío en ambos cancela.
+    Retorna (kg, monto); (0.0, 0.0) si se cancela.
+    """
+    label_kg    = f"kg {nombre}: "
+    label_monto = "$ monto:    "
+    ancho_label = max(len(label_kg), len(label_monto))
+    cx = x + ancho_label
+
+    sadd(stdscr, y,     x, label_kg,    C_CYAN() | curses.A_BOLD)
+    sadd(stdscr, y + 1, x, label_monto, C_CYAN() | curses.A_BOLD)
+
+    kg = pedir_float_modal(stdscr, "", y, cx)
+    if kg > 0:
+        monto = round(kg * precio_kg, 2) if precio_kg > 0 else 0.0
+        sadd(stdscr, y + 1, cx, f"{monto:.2f}  (calculado)", C_GREEN())
+        stdscr.refresh()
+        curses.napms(700)
+        return round(kg, 3), monto
+
+    monto = pedir_float_modal(stdscr, "", y + 1, cx)
+    if monto <= 0:
+        return 0.0, 0.0
+    if precio_kg <= 0:
+        sadd(stdscr, y, x, "  ! precio no configurado  ", C_RED())
+        stdscr.refresh()
+        curses.napms(1000)
+        return 0.0, 0.0
+
+    kg = round(monto / precio_kg, 3)
+    sadd(stdscr, y, cx, f"{kg:.3f}  (calculado)", C_GREEN())
+    stdscr.refresh()
+    curses.napms(700)
+    return kg, round(monto, 2)
 
 def _modal_bloqueante(stdscr, fn, *args, **kwargs):
     """
@@ -770,12 +809,13 @@ def _procesar_item(stdscr, sesion: SesionPOS, row, h: int, w: int) -> str:
 
     try:
         if tipo == "peso":
-            # cantidad decimal en kg (CHI)
-            kg = pedir_float_modal(stdscr, f"kg {nombre}: ", h // 2, w // 2 - 14)
+            # kg o monto $ — el que se llene calcula el otro (CHI)
+            cfg = cargar_config()
+            kg, monto = pedir_kg_o_monto_modal(stdscr, nombre, cfg.precio_chi_pub, h // 2, w // 2 - 14)
             if kg <= 0:
                 return ""
             agregar_chicharron(sesion, kg)
-            return f"{nombre} {kg:.3f}kg agregado"
+            return f"{nombre} {kg:.3f}kg (${monto:,.2f}) agregado"
 
         elif tipo == "variable":
             # precio negociado en el momento (CUB)
