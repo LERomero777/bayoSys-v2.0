@@ -124,11 +124,15 @@ def validar_stock(sku: str, cantidad: float):
         )
 
 
-def validar_cubeta_stock():
-    """Lanza ErrorPOS si no hay cubetas en bodega."""
+def validar_cubeta_stock(cantidad: float = 1):
+    """Lanza ErrorPOS si no hay cubetas suficientes en bodega para 'cantidad'."""
     row = get_sku("CUB")
-    if row and row["stock"] <= 0:
-        raise ErrorPOS("sin cubetas en bodega — registra producción primero")
+    disponible = row["stock"] if row else 0
+    if disponible < cantidad:
+        raise ErrorPOS(
+            f"stock insuficiente — Cubeta 19lt: {disponible:.0f} disponibles, "
+            f"pediste {cantidad:.0f}"
+        )
 
 
 # ── OPERACIONES DE INVENTARIO ─────────────────────────────────────────────────
@@ -200,7 +204,7 @@ def agregar_producto(sesion: SesionPOS, sku: str, cantidad: float) -> ItemTicket
         raise ErrorPOS("cantidad debe ser mayor a 0")
 
     if sku == "CUB":
-        validar_cubeta_stock()
+        validar_cubeta_stock(cantidad)
         row = get_sku("CUB")
         item = ItemTicket(
             sku         = "CUB",
@@ -229,7 +233,7 @@ def agregar_producto_precio_variable(sesion: SesionPOS, sku: str,
         raise ErrorPOS("cantidad y precio deben ser mayores a 0")
 
     if sku == "CUB":
-        validar_cubeta_stock()
+        validar_cubeta_stock(cantidad)
         descripcion = "Cubeta 19lt"
     elif sku == "LIB":
         descripcion = "Artículo"

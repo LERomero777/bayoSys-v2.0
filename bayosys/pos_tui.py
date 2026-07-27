@@ -157,6 +157,16 @@ def pedir_int_modal(stdscr, prompt: str, y: int, x: int) -> int:
     return int(val)
 
 
+def _esperar_confirmacion(stdscr) -> bool:
+    """Bloquea hasta [Enter] (True) o [Esc] (False) — ignora cualquier otra tecla."""
+    while True:
+        key = stdscr.getch()
+        if key in (10, 13):
+            return True
+        if key == 27:
+            return False
+
+
 def pedir_kg_o_monto_modal(stdscr, nombre: str, precio_kg: float, y: int, x: int) -> tuple:
     """
     Doble entrada para productos por peso (chicharrón): kg y monto ($)
@@ -421,42 +431,46 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         sadd(stdscr, my + 14, mx + 2,
              "  [Enter] cobrar  [Esc] cancelar", C_NORM())
         stdscr.refresh()
-        key = stdscr.getch()
-        if key == 27:
+        if not _esperar_confirmacion(stdscr):
             return ""
     else:
-        # necesita segundo método
+        # necesita segundo método — loopea hasta un método válido y distinto al primero
         sadd(stdscr, my + 11, mx + 2,
              f"  Falta: ${restante:>8.2f}              ", C_RED() | curses.A_BOLD)
-        sadd(stdscr, my + 12, mx + 2,
-             "  2do método: [1]Ef [2]Tr [3]Ta [Esc]", C_CYAN())
-        stdscr.refresh()
-        key = stdscr.getch()
-        if key == 27:
-            return ""
-        if key in METODOS:
-            metodo2 = METODOS[key]
-            if metodo2 == metodo1:
-                metodo2 = "transfer" if metodo1 != "transfer" else "efectivo"
-            monto2 = pedir_float_modal(stdscr, f"  {LABELS[metodo2]}$", my + 12, mx + 2)
-            pagos[metodo2] = monto2
-            total_pagado   = monto1 + monto2
-            if total_pagado < total - 0.01:
-                sadd(stdscr, my + 14, mx + 2,
-                     f"  FALTA ${total-total_pagado:.2f} — [Enter]", C_RED() | curses.A_BOLD)
-                stdscr.refresh()
-                stdscr.getch()
-                return "retry"
-            cambio = round(total_pagado - total, 2)
-            if cambio > 0:
-                sadd(stdscr, my + 13, mx + 2,
-                     f"  CAMBIO: ${cambio:.2f}          ", C_YELLOW() | curses.A_BOLD)
-            sadd(stdscr, my + 14, mx + 2,
-                 "  [Enter] cobrar  [Esc] cancelar  ", C_NORM())
+        while True:
+            sadd(stdscr, my + 12, mx + 2,
+                 "  2do método: [1]Ef [2]Tr [3]Ta [Esc]", C_CYAN())
             stdscr.refresh()
             key = stdscr.getch()
             if key == 27:
                 return ""
+            if key in METODOS and METODOS[key] != metodo1:
+                metodo2 = METODOS[key]
+                break
+            if key in METODOS:
+                sadd(stdscr, my + 12, mx + 2,
+                     "  ! ya usaste ese método — elige otro", C_RED())
+                stdscr.refresh()
+                curses.napms(900)
+
+        monto2 = pedir_float_modal(stdscr, f"  {LABELS[metodo2]}$", my + 12, mx + 2)
+        pagos[metodo2] = monto2
+        total_pagado   = monto1 + monto2
+        if total_pagado < total - 0.01:
+            sadd(stdscr, my + 14, mx + 2,
+                 f"  FALTA ${total-total_pagado:.2f} — [Enter]", C_RED() | curses.A_BOLD)
+            stdscr.refresh()
+            stdscr.getch()
+            return "retry"
+        cambio = round(total_pagado - total, 2)
+        if cambio > 0:
+            sadd(stdscr, my + 13, mx + 2,
+                 f"  CAMBIO: ${cambio:.2f}          ", C_YELLOW() | curses.A_BOLD)
+        sadd(stdscr, my + 14, mx + 2,
+             "  [Enter] cobrar  [Esc] cancelar  ", C_NORM())
+        stdscr.refresh()
+        if not _esperar_confirmacion(stdscr):
+            return ""
 
     # paso 4: cobrar
     try:
@@ -908,7 +922,7 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
         # ── COBRAR ────────────────────────────────────────────────────
         elif key in (ord("p"), ord("P")):
             if sesion.ticket and not sesion.ticket.vacio():
-                resultado = flujo_cobro(stdscr, sesion)
+                resultado = _modal_bloqueante(stdscr, flujo_cobro, sesion)
                 if resultado and resultado != "retry":
                     msg = resultado
                     sesion.nuevo_ticket()
@@ -927,7 +941,11 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
             sadd(stdscr, h // 2 - 3, w // 2 - 14, "REGISTRAR GASTO", C_TITLE())
             sadd(stdscr, h // 2 - 2, w // 2 - 14, "[1]Gas [2]Leche [3]General", C_CYAN())
             stdscr.refresh()
-            tipo_key = stdscr.getch()
+            stdscr.timeout(-1)
+            try:
+                tipo_key = stdscr.getch()
+            finally:
+                stdscr.timeout(150)
             tipo = {ord("1"): "gas", ord("2"): "leche", ord("3"): "gral"}.get(tipo_key, "gral")
             monto = pedir_float_modal(stdscr, "monto $: ",      h // 2,     w // 2 - 14)
             desc  = pedir_input(stdscr,       "descripción: ",  h // 2 + 1, w // 2 - 14, 25)

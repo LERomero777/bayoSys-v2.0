@@ -15,6 +15,7 @@ COLUMNAS NUEVAS (migración automática no-destructiva):
 
 import sqlite3
 import os
+from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Optional
 
@@ -31,6 +32,24 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+@contextmanager
+def conectar():
+    """
+    Como get_conn(), pero cierra la conexión al salir — get_conn() por sí
+    sola nunca la cierra (el protocolo 'with conn:' de sqlite3 solo hace
+    commit/rollback, no close()).
+    """
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ── SCHEMA BASE ───────────────────────────────────────────────────────────────
@@ -231,7 +250,7 @@ def init_db():
     Crea tablas, migra schema si es necesario e inserta SKUs default.
     Seguro de llamar múltiples veces — no destruye datos existentes.
     """
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.executescript(SCHEMA)
         _migrar_schema(conn)
 
@@ -250,7 +269,7 @@ def init_db():
 
 def get_inventario() -> list:
     """Todos los SKUs activos — para pantalla de inventario."""
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute("""
             SELECT * FROM inventario
             WHERE activo = 1
@@ -262,7 +281,7 @@ def get_menu_pos() -> list:
     Solo los SKUs que aparecen en el panel del POS, ordenados por orden_menu.
     Este es el reemplazo de MENU_PRODUCTOS hardcodeado.
     """
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute("""
             SELECT * FROM inventario
             WHERE activo = 1 AND es_menu = 1
@@ -270,7 +289,7 @@ def get_menu_pos() -> list:
         """).fetchall()
 
 def get_sku(sku: str) -> Optional[sqlite3.Row]:
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(
             "SELECT * FROM inventario WHERE sku = ?", (sku,)
         ).fetchone()
@@ -292,7 +311,7 @@ def agregar_sku_catalogo(sku: str, descripcion: str, unidad: str,
     if unidad not in ("pza", "kg"):
         raise ValueError(f"unidad inválida: '{unidad}'")
 
-    with get_conn() as conn:
+    with conectar() as conn:
         existente = conn.execute(
             "SELECT sku FROM inventario WHERE sku = ?", (sku,)
         ).fetchone()
@@ -337,7 +356,7 @@ def editar_sku(sku: str, **kwargs):
 
     sets  = ", ".join(f"{k} = ?" for k in campos)
     vals  = list(campos.values()) + [sku]
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(f"UPDATE inventario SET {sets} WHERE sku = ?", vals)
         conn.commit()
 
@@ -348,14 +367,14 @@ def desactivar_sku(sku: str):
     """
     if sku in ("CHI", "LIB"):
         raise ValueError(f"SKU '{sku}' no se puede desactivar — es esencial")
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(
             "UPDATE inventario SET activo = 0, es_menu = 0 WHERE sku = ?", (sku,)
         )
         conn.commit()
 
 def reactivar_sku(sku: str):
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(
             "UPDATE inventario SET activo = 1, es_menu = 1 WHERE sku = ?", (sku,)
         )
@@ -373,7 +392,7 @@ def actualizar_stock(sku: str, delta: float,
     ahora = datetime.now()
     fecha = ahora.strftime("%Y-%m-%d")
     hora  = ahora.strftime("%H:%M")
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(
             "UPDATE inventario SET stock = stock + ? WHERE sku = ?",
             (delta, sku)
@@ -386,7 +405,7 @@ def actualizar_stock(sku: str, delta: float,
         conn.commit()
 
 def actualizar_precio(sku: str, nuevo_precio: float):
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(
             "UPDATE inventario SET precio_venta = ? WHERE sku = ?",
             (nuevo_precio, sku)
@@ -410,7 +429,7 @@ def get_movimientos(sku: str = None, fecha: str = None, limit: int = 50) -> list
         params.append(fecha)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -436,7 +455,7 @@ def crear_ticket(batch_id: str, operador: str,
     p_tr   = pagos.get("transfer", 0.0)
     p_ta   = pagos.get("tarjeta",  0.0)
 
-    with get_conn() as conn:
+    with conectar() as conn:
         cur = conn.execute("""
             INSERT INTO tickets
             (fecha, hora, batch_id, operador,
@@ -471,7 +490,7 @@ def crear_ticket(batch_id: str, operador: str,
 
 def anular_ticket(ticket_id: int):
     """Marca ticket como anulado y revierte el stock de todos sus items."""
-    with get_conn() as conn:
+    with conectar() as conn:
         items = conn.execute(
             "SELECT * FROM ticket_items WHERE ticket_id = ?", (ticket_id,)
         ).fetchall()
@@ -496,7 +515,7 @@ def anular_ticket(ticket_id: int):
 def get_tickets_dia(fecha: str = None) -> list:
     if fecha is None:
         fecha = date.today().isoformat()
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute("""
             SELECT * FROM tickets
             WHERE fecha = ? AND anulado = 0
@@ -504,13 +523,13 @@ def get_tickets_dia(fecha: str = None) -> list:
         """, (fecha,)).fetchall()
 
 def get_ticket_items(ticket_id: int) -> list:
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(
             "SELECT * FROM ticket_items WHERE ticket_id = ?", (ticket_id,)
         ).fetchall()
 
 def marcar_impreso(ticket_id: int):
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute("UPDATE tickets SET impreso = 1 WHERE id = ?", (ticket_id,))
         conn.commit()
 
@@ -520,7 +539,7 @@ def marcar_impreso(ticket_id: int):
 def registrar_gasto(batch_id: str, tipo: str,
                     monto: float, descripcion: str = "") -> int:
     ahora = datetime.now()
-    with get_conn() as conn:
+    with conectar() as conn:
         cur = conn.execute("""
             INSERT INTO gastos (fecha, hora, batch_id, tipo, descripcion, monto)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -532,13 +551,13 @@ def registrar_gasto(batch_id: str, tipo: str,
 def get_gastos_dia(fecha: str = None) -> list:
     if fecha is None:
         fecha = date.today().isoformat()
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(
             "SELECT * FROM gastos WHERE fecha = ? ORDER BY id", (fecha,)
         ).fetchall()
 
 def get_gastos_batch(batch_id: str) -> list:
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(
             "SELECT * FROM gastos WHERE batch_id = ? ORDER BY id", (batch_id,)
         ).fetchall()
@@ -556,7 +575,7 @@ def calcular_corte(batch_id: str = None, fecha: str = None) -> dict:
     if fecha is None:
         fecha = date.today().isoformat()
 
-    with get_conn() as conn:
+    with conectar() as conn:
         if batch_id is not None:
             tickets = conn.execute("""
                 SELECT * FROM tickets WHERE batch_id = ? AND anulado = 0
@@ -597,7 +616,7 @@ def calcular_corte(batch_id: str = None, fecha: str = None) -> dict:
 
 def guardar_corte(batch_id: str, corte: dict, nota: str = "") -> int:
     ahora = datetime.now()
-    with get_conn() as conn:
+    with conectar() as conn:
         cur = conn.execute("""
             INSERT INTO cortes
             (fecha, hora, batch_id,
@@ -618,7 +637,7 @@ def guardar_corte(batch_id: str, corte: dict, nota: str = "") -> int:
 def get_cortes(fecha: str = None) -> list:
     if fecha is None:
         fecha = date.today().isoformat()
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(
             "SELECT * FROM cortes WHERE fecha = ? ORDER BY id", (fecha,)
         ).fetchall()
@@ -628,7 +647,7 @@ def tiene_corte_guardado(batch_id: str) -> bool:
     Retorna True si ya existe al menos un corte para este batch_id.
     Usado por guardian.py y hay_corte_pendiente() en main.py.
     """
-    with get_conn() as conn:
+    with conectar() as conn:
         row = conn.execute(
             "SELECT COUNT(*) as n FROM cortes WHERE batch_id = ?", (batch_id,)
         ).fetchone()
@@ -641,7 +660,7 @@ def resumen_ventas_dia(fecha: str = None) -> dict:
     """Agrega ventas del día por SKU. Usado por cierre.py y analisis.py."""
     if fecha is None:
         fecha = date.today().isoformat()
-    with get_conn() as conn:
+    with conectar() as conn:
         items = conn.execute("""
             SELECT ti.sku, ti.descripcion,
                    SUM(ti.cantidad) as total_cant,
@@ -666,7 +685,7 @@ def abrir_cubeta(env_1lt: int, env_05lt: int, nota: str = ""):
     hora  = ahora.strftime("%H:%M")
     ref   = f"apertura_cubeta_{fecha}_{hora}"
 
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute("UPDATE inventario SET stock = stock - 1 WHERE sku = 'CUB'")
         conn.execute("""
             INSERT INTO movimientos_inv (fecha, hora, sku, tipo, cantidad, referencia, nota)
@@ -699,7 +718,7 @@ def abrir_cubeta(env_1lt: int, env_05lt: int, nota: str = ""):
 # ── FORMATO TICKET DE TEXTO ───────────────────────────────────────────────────
 
 def formatear_ticket(ticket_id: int) -> str:
-    with get_conn() as conn:
+    with conectar() as conn:
         t = conn.execute(
             "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
         ).fetchone()
@@ -750,7 +769,7 @@ def agregar_cliente_mayoreo(clave: str, nombre: str, precio_kg: float) -> bool:
     Si ya existe (aunque inactivo), lo reactiva y actualiza precio.
     Retorna True si fue creado, False si ya existía (actualizado).
     """
-    with get_conn() as conn:
+    with conectar() as conn:
         existente = conn.execute(
             "SELECT clave FROM clientes_mayoreo WHERE clave = ?", (clave,)
         ).fetchone()
@@ -771,7 +790,7 @@ def agregar_cliente_mayoreo(clave: str, nombre: str, precio_kg: float) -> bool:
             return True
 
 def get_clientes_mayoreo(solo_activos: bool = True) -> list:
-    with get_conn() as conn:
+    with conectar() as conn:
         if solo_activos:
             return conn.execute(
                 "SELECT * FROM clientes_mayoreo WHERE activo = 1 ORDER BY nombre"
@@ -781,7 +800,7 @@ def get_clientes_mayoreo(solo_activos: bool = True) -> list:
         ).fetchall()
 
 def get_cliente_mayoreo(clave: str) -> Optional[sqlite3.Row]:
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute(
             "SELECT * FROM clientes_mayoreo WHERE clave = ?", (clave,)
         ).fetchone()
@@ -803,7 +822,7 @@ def crear_pedido_mayoreo(cliente_clave: str, kg: float, fecha_entrega: str,
         raise ValueError(f"cliente '{cliente_clave}' no existe en el tabulador")
 
     ahora = datetime.now()
-    with get_conn() as conn:
+    with conectar() as conn:
         cur = conn.execute("""
             INSERT INTO pedidos_mayoreo
             (fecha_pedido, fecha_entrega, cliente_clave, kg,
@@ -831,12 +850,12 @@ def editar_pedido_mayoreo(pedido_id: int, kg: float = None,
 
     sets = ", ".join(f"{k} = ?" for k in campos)
     vals = list(campos.values()) + [pedido_id]
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(f"UPDATE pedidos_mayoreo SET {sets} WHERE id = ?", vals)
         conn.commit()
 
 def marcar_pedido_entregado(pedido_id: int):
-    with get_conn() as conn:
+    with conectar() as conn:
         conn.execute(
             "UPDATE pedidos_mayoreo SET entregado = 1 WHERE id = ?", (pedido_id,)
         )
@@ -848,7 +867,7 @@ def get_pedidos_pendientes() -> list:
     y luego por fecha de entrega. Fuente única para el ticker y la
     pantalla de status del menú mayoreo.
     """
-    with get_conn() as conn:
+    with conectar() as conn:
         rows = conn.execute("""
             SELECT p.*, c.nombre as cliente_nombre
             FROM pedidos_mayoreo p
@@ -862,7 +881,7 @@ def get_pedidos_dia(fecha_pedido: str = None) -> list:
     """Todos los pedidos tomados en una fecha, entregados o no."""
     if fecha_pedido is None:
         fecha_pedido = date.today().isoformat()
-    with get_conn() as conn:
+    with conectar() as conn:
         return conn.execute("""
             SELECT p.*, c.nombre as cliente_nombre
             FROM pedidos_mayoreo p
