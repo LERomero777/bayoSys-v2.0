@@ -210,8 +210,12 @@ def calcular_ing_manteca_real(cierre, cfg: Config) -> dict:
     env_05lt_total   = sum(v.env_05lt for v in cierre.ventas_litreada)
     lt_litreada_total = lt_vendidos_1lt + lt_vendidos_05lt
 
-    ing_litreada_1lt  = env_1lt_total  * cfg.precio_mant_lt1
-    ing_litreada_05lt = env_05lt_total * cfg.precio_mant_lt05
+    # el precio de la venta manda; los cierres viejos no lo traen (0.0) y caen
+    # a Config — sin esto, cambiar un precio hoy repreciaba todo el histórico
+    ing_litreada_1lt  = sum(v.env_1lt  * (v.precio_1lt  or cfg.precio_mant_lt1)
+                            for v in cierre.ventas_litreada)
+    ing_litreada_05lt = sum(v.env_05lt * (v.precio_05lt or cfg.precio_mant_lt05)
+                            for v in cierre.ventas_litreada)
     ing_litreada      = ing_litreada_1lt + ing_litreada_05lt
 
     # cubetas

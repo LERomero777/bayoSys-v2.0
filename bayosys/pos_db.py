@@ -681,6 +681,24 @@ def tiene_corte_guardado(batch_id: str) -> bool:
 
 # ── RESUMEN VENTAS DÍA ────────────────────────────────────────────────────────
 
+def get_items_vendidos_dia(sku: str, fecha: str = None) -> list:
+    """
+    Líneas de venta de un SKU en el día, ticket por ticket.
+    A diferencia de resumen_ventas_dia() no agrega — conserva el precio real
+    de cada transacción, que en cubetas se negocia venta por venta.
+    """
+    if fecha is None:
+        fecha = date.today().isoformat()
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT ti.ticket_id, ti.cantidad, ti.precio_unit, ti.subtotal, t.hora
+            FROM ticket_items ti
+            JOIN tickets t ON ti.ticket_id = t.id
+            WHERE t.fecha = ? AND t.anulado = 0 AND ti.sku = ?
+            ORDER BY ti.ticket_id
+        """, (fecha, sku)).fetchall()
+
+
 def resumen_ventas_dia(fecha: str = None) -> dict:
     """Agrega ventas del día por SKU. Usado por cierre.py y analisis.py."""
     if fecha is None:
