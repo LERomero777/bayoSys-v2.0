@@ -16,73 +16,59 @@ from typing import List
 
 from config import cargar_config, guardar_config
 from models import LT_POR_CUBETA, LT_POR_ENV_1LT, LT_POR_ENV_05LT
-
-
-# ── COLORES ──────────────────────────────────────────────────────────────────
-
-def init_colors():
-    curses.start_color()
-    curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_WHITE,   -1)
-    curses.init_pair(2, curses.COLOR_CYAN,    -1)
-    curses.init_pair(3, curses.COLOR_GREEN,   -1)
-    curses.init_pair(4, curses.COLOR_YELLOW,  -1)
-    curses.init_pair(5, curses.COLOR_RED,     -1)
-    curses.init_pair(6, curses.COLOR_BLACK,   curses.COLOR_CYAN)
-    curses.init_pair(7, curses.COLOR_CYAN,    -1)
-    curses.init_pair(8, curses.COLOR_MAGENTA, -1)
-
-C_NORMAL  = lambda: curses.color_pair(1)
-C_CYAN    = lambda: curses.color_pair(2)
-C_GREEN   = lambda: curses.color_pair(3)
-C_YELLOW  = lambda: curses.color_pair(4)
-C_RED     = lambda: curses.color_pair(5)
-C_TAB_ON  = lambda: curses.color_pair(6) | curses.A_BOLD
-C_TAB_OFF = lambda: curses.color_pair(7)
-C_TITLE   = lambda: curses.color_pair(8) | curses.A_BOLD
-
-def margen_color(pct):
-    if pct < 15: return C_RED()
-    if pct < 30: return C_YELLOW()
-    return C_GREEN()
-
-def util_color(val):
-    if val < 0:    return C_RED()
-    if val < 1000: return C_YELLOW()
-    return C_GREEN()
+from estilos import (
+    init_colors, sadd as safe_add, hline, encabezado, pie,
+    abrir_lienzo, verificar_tamano, set_titulo_terminal, CAJA,
+    TEXTO, ACENTO, OK, AVISO, ALERTA, TITULO, DATO, TAB, BOTON, CHROME,
+    color_margen as margen_color, color_utilidad as util_color,
+)
 
 
 # ── HELPERS DE DIBUJO ────────────────────────────────────────────────────────
+# La paleta y safe_add viven en estilos.py, compartidos con pos_tui.py.
+# Antes este archivo tenía su propio init_colors() con 8 pares donde
+# pos_tui tenía 9, y el par 7 significaba cosas distintas en cada uno.
 
-def safe_add(win, y, x, text, attr=0):
-    h, w = win.getmaxyx()
-    if y < 0 or y >= h or x < 0: return
-    max_len = w - x - 1
-    if max_len <= 0: return
-    try:
-        win.addstr(y, x, str(text)[:max_len], attr)
-    except curses.error:
-        pass
+# Anchos de la columna de sliders. Se fijan aquí en vez de derivarse del
+# largo de cada etiqueta: si el ancho de barra depende de la etiqueta, cada
+# barra termina en una columna distinta y los valores dejan de alinearse.
+ANCHO_ETIQUETA = 22
+ANCHO_VALOR    = 10
+ANCHO_SLIDERS  = 52
+X_RESULTADOS   = ANCHO_SLIDERS + 2
+
 
 def draw_slider(win, y, x, width, val, min_v, max_v, label, fmt, unit, selected):
-    bar_w   = max(10, width - len(label) - 14)
+    bar_w   = max(8, width - ANCHO_ETIQUETA - ANCHO_VALOR - 3)
     pct     = (val - min_v) / (max_v - min_v) if max_v > min_v else 0
-    fill    = int(pct * bar_w)
+    fill    = max(0, min(bar_w, int(pct * bar_w)))
     val_str = fmt.format(val) + unit
-    attr_l  = C_CYAN() | curses.A_BOLD if selected else C_NORMAL()
-    attr_b  = C_CYAN() | curses.A_BOLD if selected else C_CYAN()
-    safe_add(win, y, x,               f"{label:<22}",           attr_l)
-    safe_add(win, y, x + 22,          "[",                      C_NORMAL())
-    safe_add(win, y, x + 23,          "█" * fill,               attr_b)
-    safe_add(win, y, x + 23 + fill,   "░" * (bar_w - fill),     C_NORMAL())
-    safe_add(win, y, x + 23 + bar_w,  "] ",                     C_NORMAL())
-    safe_add(win, y, x + 25 + bar_w,  val_str,
-             C_CYAN() | (curses.A_BOLD if selected else 0))
+    attr_l  = ACENTO() | curses.A_BOLD if selected else TEXTO()
+    attr_b  = ACENTO() | curses.A_BOLD if selected else ACENTO()
+
+    x_bar = x + ANCHO_ETIQUETA
+    x_val = x_bar + bar_w + 3
+
+    # el tramo vacío va en CHROME: la barra debe leerse por contraste de
+    # brillo, no por dos colores compitiendo
+    safe_add(win, y, x,                f"{label:<{ANCHO_ETIQUETA}}", attr_l)
+    safe_add(win, y, x_bar,            CAJA["bar_i"],                CHROME())
+    safe_add(win, y, x_bar + 1,        CAJA["lleno"] * fill,         attr_b)
+    safe_add(win, y, x_bar + 1 + fill, CAJA["vacio"] * (bar_w - fill), CHROME())
+    safe_add(win, y, x_bar + 1 + bar_w, CAJA["bar_d"],               CHROME())
+    safe_add(win, y, x_val,            f"{val_str:>{ANCHO_VALOR}}",
+             DATO() | (curses.A_BOLD if selected else 0))
+
+ANCHO_KV      = 18   # ancho de la etiqueta en el panel de resultados
+ANCHO_COLUMNA = 42   # ancho de una columna de resultados
+
 
 def draw_kv(win, y, x, label, value, color=None):
-    if color is None: color = C_NORMAL()
-    safe_add(win, y, x,      f"{label:<26}", C_NORMAL())
-    safe_add(win, y, x + 26, str(value),     color)
+    """Par etiqueta/valor. La etiqueta va apagada y el valor destacado —
+    en una pantalla llena de números, el ojo debe caer en las cifras."""
+    if color is None: color = DATO()
+    safe_add(win, y, x,            f"{label:<{ANCHO_KV}}", CHROME())
+    safe_add(win, y, x + ANCHO_KV, str(value),             color)
 
 
 # ── DEFINICIÓN DE SLIDERS ────────────────────────────────────────────────────
@@ -213,68 +199,102 @@ def simular(cfg, extras: dict) -> dict:
 
 # ── PANEL DE RESULTADOS ───────────────────────────────────────────────────────
 
-def draw_results(win, r, rx, start_y):
-    y = start_y
+def draw_results(win, r, columnas):
+    """
+    Vuelca el panel de resultados sobre una o más columnas.
+
+    `columnas` es una lista de (x, y_inicial, y_maxima). Cuando una columna
+    se llena, sigue en la siguiente. Con el lienzo de alto fijo los ~31
+    renglones de resultados no caben en una sola columna, y sin este salto
+    las últimas secciones (utilidad y precios recomendados — justo las que
+    se consultan) quedaban cortadas fuera de la pantalla.
+    """
+    col = 0
+    rx, y, y_max = columnas[0]
+    activa = True     # False cuando la sección en curso no cupo en ningún lado
+
+    def hay_lugar(n=1):
+        return y + n <= y_max
+
+    def siguiente_columna() -> bool:
+        nonlocal col, rx, y, y_max
+        if col + 1 >= len(columnas):
+            return False
+        col += 1
+        rx, y, y_max = columnas[col]
+        return True
 
     def kv(label, val, color=None):
         nonlocal y
+        # si el encabezado de la sección no cupo, sus renglones tampoco se
+        # dibujan: media sección suelta sin título se lee como un error
+        if not activa:
+            return
+        if not hay_lugar() and not siguiente_columna():
+            return
         draw_kv(win, y, rx, label, val, color)
         y += 1
 
-    def sep():
-        nonlocal y
-        safe_add(win, y, rx, "─" * 40, C_NORMAL())
-        y += 1
+    def seccion(titulo):
+        """Un título nunca debe quedar solo al final de una columna: si no
+        caben al menos tres renglones, la sección entera salta."""
+        nonlocal y, activa
+        if y != columnas[col][1]:
+            y += 1
+        if not hay_lugar(3) and not siguiente_columna():
+            activa = False
+            return
+        activa = True
+        safe_add(win, y, rx, titulo, TITULO()); y += 1
+        hline(win, y, rx, ANCHO_COLUMNA); y += 1
 
-    safe_add(win, y, rx, "PRODUCCIÓN", C_TITLE()); y += 1
-    sep()
+    seccion("PRODUCCIÓN")
     kv("chicharrón",  f"{r['kg_chi']:.1f} kg  ({r['rend_chi']:.1f}%)")
-    kv("manteca",     f"{r['kg_mant']:.1f} kg / {r['lt_mant']:.1f} lt  ({r['rend_mant']:.1f}%)")
+    kv("manteca",     f"{r['kg_mant']:.1f}kg / {r['lt_mant']:.1f}lt ({r['rend_mant']:.1f}%)")
     kv("merma",       f"{r['merma_kg']:.1f} kg  ({r['merma_pct']:.1f}%)")
-    y += 1
-
-    safe_add(win, y, rx, "COSTOS", C_TITLE()); y += 1
-    sep()
+    seccion("COSTOS")
     kv("costo grasa",   f"${r['c_grasa']:,.0f}")
     kv("costo total",   f"${r['c_total']:,.0f}")
     kv("costo/kg chi",  f"${r['c_chi_u']:.2f}/kg")
     kv("costo/kg mant", f"${r['c_mnt_u']:.2f}/kg")
-    y += 1
-
-    safe_add(win, y, rx, "MÁRGENES", C_TITLE()); y += 1
-    sep()
+    seccion("MÁRGENES")
     kv("chi público",    f"{r['mg_cp']:.1f}%",  margen_color(r['mg_cp']))
     kv("chi mayoreo",    f"{r['mg_cm']:.1f}%",  margen_color(r['mg_cm']))
     kv("mant cubeta",    f"{r['mg_ml']:.1f}%",  margen_color(r['mg_ml']))
     kv("mant 1lt",       f"{r['mg_l1']:.1f}%",  margen_color(r['mg_l1']))
     kv("mant 500ml",     f"{r['mg_l05']:.1f}%", margen_color(r['mg_l05']))
-    y += 1
-
-    safe_add(win, y, rx, "RESULTADO", C_TITLE()); y += 1
-    sep()
+    seccion("RESULTADO")
     kv("ingreso chi",    f"${r['ing_chi']:,.0f}")
-    kv("ingreso litreada",f"${r['ing_lit']:,.0f}  ({r['env_1lt']:.0f}×1lt  {r['env_05lt']:.0f}×½lt)")
+    kv("ingreso litreada", f"${r['ing_lit']:,.0f} ({r['env_1lt']:.0f}×1lt {r['env_05lt']:.0f}×½lt)")
     kv("ingreso cubeta", f"${r['ing_cub']:,.0f}  ({r['cubetas']:.1f} cub)")
     kv("ingreso total",  f"${r['ing_tot']:,.0f}")
     kv("UTILIDAD DÍA",   f"${r['util']:,.0f}",  util_color(r['util']))
     kv("UTIL MES ×25",   f"${r['util_mes']:,.0f}",
        util_color(r['util']) | curses.A_BOLD)
-    y += 1
-
-    safe_add(win, y, rx, "PRECIOS REC. CHICHARRÓN", C_TITLE()); y += 1
-    sep()
-    kv("mínimo",  f"${r['precio_min']:.2f}/kg",   C_YELLOW())
-    kv("justo",   f"${r['precio_justo']:.2f}/kg",  C_GREEN())
+    seccion("PRECIOS REC. CHICHARRÓN")
+    kv("mínimo",  f"${r['precio_min']:.2f}/kg",   AVISO())
+    kv("justo",   f"${r['precio_justo']:.2f}/kg",  OK())
     kv("premium", f"${r['precio_prem']:.2f}/kg",
-       C_GREEN() | curses.A_BOLD)
+       OK() | curses.A_BOLD)
 
 
 # ── LOOP PRINCIPAL ────────────────────────────────────────────────────────────
 
-def main(stdscr):
+def main(pantalla):
+    """
+    'pantalla' es la terminal real; 'stdscr' es el lienzo de tamaño fijo
+    centrado en ella — mismo esquema que pos_tui.py, para que las dos
+    pantallas de curses del sistema midan lo mismo al abrir.
+    """
     curses.curs_set(0)
-    stdscr.keypad(True)
     init_colors()
+    pantalla.keypad(True)
+    if not verificar_tamano(pantalla):
+        return
+
+    dims_term = pantalla.getmaxyx()
+    stdscr    = abrir_lienzo(pantalla)
+    stdscr.keypad(True)
 
     cfg     = cargar_config()
     tab_idx = 0
@@ -297,53 +317,64 @@ def main(stdscr):
     }
 
     while True:
+        # si se redimensiona la terminal, el lienzo se recentra
+        if pantalla.getmaxyx() != dims_term:
+            dims_term = pantalla.getmaxyx()
+            stdscr    = abrir_lienzo(pantalla)
+            stdscr.keypad(True)
+
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
-        safe_add(stdscr, 0, 0,
-                 "  bayoSys · Simulador de Escenarios".center(w), C_TITLE())
+        r_cab = simular(cfg, extras)
+        encabezado(stdscr, "simulador de escenarios",
+                   f"utilidad/día  ${r_cab['util']:,.0f}",
+                   util_color(r_cab["util"]) | curses.A_BOLD)
 
-        # tabs
+        # tabs — la activa en video inverso, las demás apagadas
         tx = 2
         for i, (name, _) in enumerate(TABS):
             label = f" {name} "
-            safe_add(stdscr, 1, tx, label,
-                     C_TAB_ON() if i == tab_idx else C_TAB_OFF())
+            safe_add(stdscr, 2, tx, label,
+                     TAB() if i == tab_idx else CHROME())
             tx += len(label) + 1
-        safe_add(stdscr, 1, tx + 2,
-                 "[ Tab: tab  ↑↓: slider  ←→: ajustar  s: guardar  q: salir ]",
-                 C_NORMAL())
-
-        safe_add(stdscr, 2, 0, "─" * (w - 1), C_NORMAL())
+        hline(stdscr, 3, 0, w)
 
         sliders  = TABS[tab_idx][1]
         n        = len(sliders)
         sl_idx   = max(0, min(sl_idx, n - 1))
-        sl_width = min(58, w // 2 - 2)
+        sl_width = min(ANCHO_SLIDERS, w - 4)
 
         for i, sl in enumerate(sliders):
             val = extras.get(sl.key, sl.min_val)
-            draw_slider(stdscr, 4 + i * 2, 1, sl_width,
+            draw_slider(stdscr, 5 + i, 1, sl_width,
                         val, sl.min_val, sl.max_val,
                         sl.label, sl.fmt, sl.unit,
                         selected=(i == sl_idx))
 
-        hint_y = 4 + n * 2 + 1
-        safe_add(stdscr, hint_y, 1, "Shift+←→ = paso x5", C_NORMAL())
+        # dos columnas: primero la derecha (completa, de arriba a abajo) y
+        # después el hueco que dejan los sliders abajo a la izquierda
+        y_libre_izq = 5 + n + 1
+        columnas = [(X_RESULTADOS, 5, h - 3)]
+        if y_libre_izq < h - 5:
+            columnas.append((2, y_libre_izq, h - 3))
+        if X_RESULTADOS + 30 < w:
+            draw_results(stdscr, r_cab, columnas)
 
-        rx = sl_width + 4
-        if rx + 30 < w:
-            r = simular(cfg, extras)
-            draw_results(stdscr, r, rx, 3)
-
-        r = simular(cfg, extras)
+        r = r_cab
         status = (f"  util/día: ${r['util']:,.0f}  |  "
                   f"ing: ${r['ing_tot']:,.0f}  |  "
                   f"chi: {r['kg_chi']:.1f}kg  "
                   f"mant: {r['kg_mant']:.1f}kg  |  "
                   f"costo: ${r['c_total']:,.0f}")
-        safe_add(stdscr, h - 1, 0, status[:w - 1],
-                 util_color(r['util']) | curses.A_BOLD)
+        # pie de teclas y, en el mismo renglón, la utilidad del día: es el
+        # dato que decide todo, así que va aparte y con su propio semáforo
+        # en vez de diluirse entre los demás números de la barra
+        pie(stdscr, ("Tab", "pestaña"), ("↑↓", "slider"), ("←→", "ajustar"),
+            ("Shift+←→", "paso x5"), ("s", "guardar"), ("q", "salir"))
+
+        safe_add(stdscr, h - 1, 0, " " * (w - 1), TAB())
+        safe_add(stdscr, h - 1, 0, status[:w - 1], TAB())
 
         stdscr.refresh()
 
@@ -363,7 +394,7 @@ def main(stdscr):
             cfg.diario_empleado   = extras["diario_empleado"]
             cfg.alpha             = extras["alpha"] / 100
             guardar_config(cfg)
-            safe_add(stdscr, h - 2, 1, " config guardada ", C_GREEN())
+            safe_add(stdscr, h - 1, 1, " config guardada ", BOTON())
             stdscr.refresh()
             curses.napms(800)
         elif key == ord('\t'):
@@ -384,7 +415,11 @@ def main(stdscr):
 
 
 def iniciar_tui():
-    curses.wrapper(main)
+    set_titulo_terminal("bayoSys · Simulador de escenarios")
+    try:
+        curses.wrapper(main)
+    finally:
+        set_titulo_terminal()
 
 
 if __name__ == "__main__":

@@ -214,6 +214,7 @@ _CAJA_UNICODE = {
     "H": "━", "V": "┃", "TL": "┏", "TR": "┓", "BL": "┗", "BR": "┛",
     "T_ABAJO": "┳", "T_ARRIBA": "┻", "T_IZQ": "┨",
     "l_pesado": "┠", "r_pesado": "┨",
+    "lleno": "█", "vacio": "░", "bar_i": "[", "bar_d": "]",
     "cap_i": "╸", "cap_d": "╺",
 }
 
@@ -223,6 +224,7 @@ _CAJA_ASCII = {
     "H": "=", "V": "|", "TL": "+", "TR": "+", "BL": "+", "BR": "+",
     "T_ABAJO": "+", "T_ARRIBA": "+", "T_IZQ": "+",
     "l_pesado": "+", "r_pesado": "+",
+    "lleno": "#", "vacio": ".", "bar_i": "[", "bar_d": "]",
     "cap_i": " ", "cap_d": " ",
 }
 
@@ -365,18 +367,23 @@ def divisor(win, y, x, ancho, attr=None, pesado=True):
         sadd(win, y, x + ancho - 1, der, attr)
 
 
-def encabezado(win, titulo, derecha=""):
+def encabezado(win, titulo, derecha="", attr_derecha=None):
     """
     Barra de título de una pantalla completa: nombre a la izquierda, dato de
     contexto a la derecha, trazo grueso debajo. Las pantallas que ocupan
     todo el lienzo usan esto en vez de marco() — no llevan borde lateral,
     así que la jerarquía la da la barra.
+
+    El hueco de la derecha sirve para el dato que debe estar siempre a la
+    vista (el batch activo, la utilidad del día); `attr_derecha` permite
+    darle color propio cuando ese dato tiene semáforo.
     """
     w = win.getmaxyx()[1]
     sadd(win, 0, 0, " " * (w - 1))
     sadd(win, 0, 2, titulo.upper(), TITULO())
     if derecha:
-        sadd(win, 0, max(0, w - len(derecha) - 2), derecha, CHROME())
+        sadd(win, 0, max(0, w - len(derecha) - 2), derecha,
+             CHROME() if attr_derecha is None else attr_derecha)
     sadd(win, 1, 0, CAJA["H"] * (w - 1), CHROME())
 
 
