@@ -75,6 +75,19 @@ def _pedir_float_c(prompt, minimo=0.0, maximo=999.0) -> float:
         except ValueError:
             print("  ! ingresa un número válido")
 
+def _pedir_float_opcional(prompt, minimo=0.0, maximo=999.0) -> float:
+    """Como _pedir_float pero Enter vacío devuelve 0.0 (omitir → se deriva), sin cancelar el registro."""
+    while True:
+        raw = input(f"  {prompt}  [Enter = usar derivado]: ").strip()
+        if raw == "":
+            return 0.0
+        try:
+            val = float(raw)
+            if minimo <= val <= maximo:
+                return val
+            print(f"  ! valor fuera del límite físico posible (máx {maximo:.3f} kg), intenta de nuevo")
+        except ValueError:
+            print("  ! ingresa un número válido")
 
 def _pedir_opcion_c(prompt, opciones: list) -> str:
     """Como _pedir_opcion pero '0' o Enter vacío cancela el registro completo."""
@@ -155,11 +168,18 @@ def registrar_batch():
 
         operador = input("  operador (Enter = yo): ").strip() or "yo"
 
+        # ── tiempos de coccion ────────────────────────────────────────
+        print("\n  TIEMPOS DE COCCIÒN")
+        hora_inicio = input("  hora inicio cocciòn (HH:MM, Enter = omitir): ").strip()
+        hora_fin    = input("  hora fin cocciòn (HH:MM, Enter = omitir): ").strip()
         # ── mediciones de báscula ────────────────────────────────────────
         print("\n  MEDICIONES DE BÁSCULA")
         kg_grasa = _pedir_float_c("  kg grasa entrada (báscula ANTES)", 1.0, 200.0)
         kg_chi   = _pedir_float_c("  kg chicharrón salida (báscula DESPUÉS)", 0.1, 100.0)
-
+        # ── manteca  ───────────────────────────────────────────────────── 
+        print("\n  MANTECA")
+        maximo_mant = round(kg_grasa - kg_chi, 3)
+        kg_mant_real = _pedir_float_opcional( "  kg manteca real pesada", 0.0, maximo_mant)
         # ── observaciones ────────────────────────────────────────────────
         obs = input("\n  observaciones (Enter para omitir): ").strip()
 
@@ -179,6 +199,9 @@ def registrar_batch():
         kg_grasa     = kg_grasa,
         kg_chi       = kg_chi,
         observaciones= obs,
+        hora_inicio  = hora_inicio,
+        hora_fin     = hora_fin,
+        kg_mant_real = kg_mant_real,
     )
 
     # ── vista previa con cálculos ────────────────────────────────────

@@ -59,6 +59,9 @@ class Batch:
     kg_grasa: float     # ANTES de echar al cazo
     kg_chi:   float     # DESPUÉS de sacar el chicharrón
     observaciones: str = ""
+    hora_inicio:   str = ""
+    hora_fin:      str = ""
+    kg_mant_real:  float = 0.0
 
 
 # ── RESULTADO DE BATCH ───────────────────────────────────────────────────────
