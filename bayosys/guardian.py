@@ -18,26 +18,36 @@ from datetime import date, timedelta, datetime
 from config import cargar_batches, fechas_con_registro, fecha_hoy, cargar_config
 from cierre import cargar_cierre
 from pos_db import tiene_corte_guardado, calcular_corte, guardar_corte
+from estilos import (
+    esc, esc_negrita, reset, sep_txt, CAJA,
+)
 
 
-# ── COLORES ANSI (Dead Space — sin curses, output directo) ───────────────────
+# ── COLORES ANSI ─────────────────────────────────────────────────────────────
+# Este módulo ya escribía escapes ANSI a mano. Ahora los toma de estilos.py,
+# que devuelve "" cuando la terminal no soporta color o cuando la salida está
+# redirigida — antes se emitían siempre, así que mandar el reporte del
+# guardián a un archivo lo llenaba de basura tipo ESC[91m. De paso, en
+# terminales de 256 colores los tonos suben solos a la paleta fina.
 
-R  = "\033[91m"     # rojo   — alerta crítica
-Y  = "\033[93m"     # amarillo — advertencia
-C  = "\033[96m"     # cyan   — info / acción
-G  = "\033[92m"     # verde  — OK
-DIM = "\033[2m"     # tenue  — texto secundario
-B  = "\033[1m"      # bold
-RST = "\033[0m"     # reset
+R   = esc("alerta")    # alerta crítica
+Y   = esc("aviso")     # advertencia
+C   = esc("acento")    # info / acción
+G   = esc("ok")        # nominal
+DIM = esc("chrome")    # texto secundario
+B   = esc_negrita()
+RST = reset()
 
-def _sep(char="═", ancho=54, color=C):
+def _sep(char=None, ancho=54, color=C):
+    if char is None:
+        char = CAJA["H"]
     print(f"{color}{char * ancho}{RST}")
 
 def _titulo(texto, color=R):
     print()
-    _sep("█", color=color)
+    _sep(CAJA["lleno"], color=color)
     print(f"{color}{B}  {texto}{RST}")
-    _sep("█", color=color)
+    _sep(CAJA["lleno"], color=color)
 
 def _ok(texto):
     print(f"  {G}✓{RST}  {texto}")

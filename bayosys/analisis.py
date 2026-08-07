@@ -19,21 +19,24 @@ from calcular import (
     calcular_ing_manteca_real, calcular_ing_chi_real
 )
 from models import DENSIDAD_MANTECA, LT_POR_CUBETA
+from estilos import (
+    titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
+    opcion_txt, dato_txt, c,
+)
 
 
 # ── HELPERS DE FORMATO ───────────────────────────────────────────────────────
 
-def _sep(char="─", ancho=54):
-    print(char * ancho)
+def _sep(char=None, ancho=54, estilo="chrome"):
+    print(sep_txt(char, ancho, estilo))
 
 def _titulo(texto):
     print()
-    _sep("═")
-    print(f"  {texto}")
-    _sep("═")
+    print(titulo_txt(texto, 54))
 
 def _subtitulo(texto):
-    print(f"\n  {texto}")
+    print()
+    print(f"  {c(texto, 'acento', negrita=True)}")
     _sep()
 
 def _fila(label, valor, extra="", ancho=28):
@@ -201,9 +204,9 @@ def mostrar_dia(fecha: str):
     if actual < r.precio_min_chi:
         print(f"\n  !! ALERTA: precio actual ${actual} está BAJO el costo real")
     elif actual < r.precio_justo_chi:
-        print(f"\n  !  precio actual ${actual} tiene margen ajustado")
+        print("\n" + alerta_txt(f" precio actual ${actual} tiene margen ajustado"))
     else:
-        print(f"\n  ✓  precio actual ${actual} está en rango sano")
+        print("\n" + ok_txt(f" precio actual ${actual} está en rango sano"))
     print()
 
 
@@ -289,14 +292,12 @@ def mostrar_proveedores(n_dias: int = 90):
 def menu_analisis():
     while True:
         print("\n")
-        _sep("═")
-        print("  ANÁLISIS — bayoSys")
-        _sep("═")
-        print("  [1] resumen de hoy")
-        print("  [2] resumen de otro día")
-        print("  [3] histórico (últimos 7 días)")
-        print("  [4] comparativo de proveedores")
-        print("  [5] volver al menú principal")
+        print(titulo_txt("ANÁLISIS — bayoSys"))
+        print(opcion_txt("1", "resumen de hoy"))
+        print(opcion_txt("2", "resumen de otro día"))
+        print(opcion_txt("3", "histórico (últimos 7 días)"))
+        print(opcion_txt("4", "comparativo de proveedores"))
+        print(opcion_txt("5", "volver al menú principal"))
 
         op = input("\n  opción: ").strip()
 
@@ -317,9 +318,9 @@ def menu_analisis():
                 if 0 <= idx < len(fechas[-10:]):
                     mostrar_dia(fechas[-10:][idx])
                 else:
-                    print("  ! opción inválida")
+                    print(alerta_txt("opción inválida"))
             except ValueError:
-                print("  ! ingresa un número")
+                print(alerta_txt("ingresa un número"))
 
         elif op == "3":
             mostrar_historico(7)
@@ -331,7 +332,7 @@ def menu_analisis():
             break
 
         else:
-            print("  ! opción inválida")
+            print(alerta_txt("opción inválida"))
 
 
 if __name__ == "__main__":

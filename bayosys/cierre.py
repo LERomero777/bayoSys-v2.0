@@ -23,6 +23,10 @@ from dataclasses import dataclass, asdict
 from typing import List
 
 from config import fecha_hoy, BASE_DIR
+from estilos import (
+    titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
+    opcion_txt, dato_txt, c,
+)
 from calcular import calcular_dia, calcular_ing_manteca_real, calcular_ing_chi_real
 from config import cargar_batches, cargar_config
 from models import (
@@ -125,14 +129,12 @@ def leer_manteca_del_pos(fecha: str) -> dict:
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 
-def _sep(char="─", ancho=54):
-    print(char * ancho)
+def _sep(char=None, ancho=54, estilo="chrome"):
+    print(sep_txt(char, ancho, estilo))
 
 def _titulo(texto):
     print()
-    _sep("═")
-    print(f"  {texto}")
-    _sep("═")
+    print(titulo_txt(texto, 54))
 
 def _pedir_float(prompt, minimo=0.0, maximo=9999.0) -> float:
     # si el rango viene vacío no hay valor que aceptar: preguntar sería un
@@ -144,9 +146,9 @@ def _pedir_float(prompt, minimo=0.0, maximo=9999.0) -> float:
             val = float(input(f"  {prompt}: ").strip())
             if minimo <= val <= maximo:
                 return val
-            print(f"  ! valor fuera de rango ({minimo}–{maximo})")
+            print(alerta_txt(f"valor fuera de rango ({minimo}–{maximo})"))
         except ValueError:
-            print("  ! ingresa un número válido")
+            print(alerta_txt("ingresa un número válido"))
 
 def _confirmar(prompt) -> bool:
     return input(f"  {prompt} [s/n]: ").strip().lower() in ("s", "si", "sí", "y")
@@ -160,7 +162,7 @@ def registrar_cierre():
 
     batches = cargar_batches(fecha)
     if not batches:
-        print(f"\n  ! no hay batches registrados para {fecha}")
+        print("\n" + alerta_txt(f"no hay batches registrados para {fecha}"))
         return None
 
     # costo de gas del día
@@ -267,7 +269,7 @@ def registrar_cierre():
     print()
     if _confirmar("  ¿guardar cierre?"):
         guardar_cierre(cierre)
-        print(f"\n  ✓ cierre guardado\n")
+        print("\n" + ok_txt(f"cierre guardado") + "\n")
         return cierre
     else:
         print("\n  ✗ cierre descartado\n")
@@ -294,13 +296,13 @@ def menu_cierre():
             print(f"  stock lit:    {cierre.stock_litreada_lt:.2f} lt")
             print(f"  stock cub:    {cierre.stock_cubetas:.2f} cub")
             print()
-            print("  [1] rehacer cierre")
-            print("  [2] volver")
+            print(opcion_txt("1", "rehacer cierre"))
+            print(opcion_txt("2", "volver"))
         else:
             print("  sin cierre registrado hoy")
             print()
-            print("  [1] registrar cierre")
-            print("  [2] volver")
+            print(opcion_txt("1", "registrar cierre"))
+            print(opcion_txt("2", "volver"))
 
         op = input("\n  opción: ").strip()
         if op == "1":

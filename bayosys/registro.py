@@ -11,6 +11,10 @@ from config import (
     fecha_hoy, siguiente_batch_id
 )
 from calcular import calcular_batch
+from estilos import (
+    titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
+    opcion_txt, dato_txt, c,
+)
 from models import Batch
 
 
@@ -29,9 +33,8 @@ def _limpiar():
 
 
 def _titulo(texto):
-    print(f"\n{'─' * 48}")
-    print(f"  {texto}")
-    print(f"{'─' * 48}")
+    print()
+    print(titulo_txt(texto, 54))
 
 def _pedir_float(prompt, minimo=0.0, maximo=999.0) -> float:
     while True:
@@ -39,9 +42,9 @@ def _pedir_float(prompt, minimo=0.0, maximo=999.0) -> float:
             val = float(input(f"  {prompt}: ").strip())
             if minimo <= val <= maximo:
                 return val
-            print(f"  ! valor fuera de rango ({minimo}–{maximo}), intenta de nuevo")
+            print(alerta_txt(f"valor fuera de rango ({minimo}–{maximo}), intenta de nuevo"))
         except ValueError:
-            print("  ! ingresa un número válido")
+            print(alerta_txt("ingresa un número válido"))
 
 
 def _pedir_opcion(prompt, opciones: list) -> str:
@@ -53,9 +56,9 @@ def _pedir_opcion(prompt, opciones: list) -> str:
             idx = int(input(f"  {prompt}: ").strip())
             if 1 <= idx <= len(opciones):
                 return opciones[idx - 1]
-            print(f"  ! elige entre 1 y {len(opciones)}")
+            print(alerta_txt(f"elige entre 1 y {len(opciones)}"))
         except ValueError:
-            print("  ! ingresa el número de la opción")
+            print(alerta_txt("ingresa el número de la opción"))
 
 def _confirmar(prompt) -> bool:
     resp = input(f"  {prompt} [s/n]: ").strip().lower()
@@ -71,9 +74,9 @@ def _pedir_float_c(prompt, minimo=0.0, maximo=999.0) -> float:
             val = float(raw)
             if minimo <= val <= maximo:
                 return val
-            print(f"  ! valor fuera de rango ({minimo}–{maximo}), intenta de nuevo")
+            print(alerta_txt(f"valor fuera de rango ({minimo}–{maximo}), intenta de nuevo"))
         except ValueError:
-            print("  ! ingresa un número válido")
+            print(alerta_txt("ingresa un número válido"))
 
 def _pedir_float_opcional(prompt, minimo=0.0, maximo=999.0) -> float:
     """Como _pedir_float pero Enter vacío devuelve 0.0 (omitir → se deriva), sin cancelar el registro."""
@@ -85,15 +88,15 @@ def _pedir_float_opcional(prompt, minimo=0.0, maximo=999.0) -> float:
             val = float(raw)
             if minimo <= val <= maximo:
                 return val
-            print(f"  ! valor fuera del límite físico posible (máx {maximo:.3f} kg), intenta de nuevo")
+            print(alerta_txt(f"valor fuera del límite físico posible (máx {maximo:.3f} kg), intenta de nuevo"))
         except ValueError:
-            print("  ! ingresa un número válido")
+            print(alerta_txt("ingresa un número válido"))
 
 def _pedir_opcion_c(prompt, opciones: list) -> str:
     """Como _pedir_opcion pero '0' o Enter vacío cancela el registro completo."""
     for i, op in enumerate(opciones, 1):
         print(f"  [{i}] {op}")
-    print(f"  [0] cancelar registro")
+    print(opcion_txt("0", "cancelar registro"))
     while True:
         raw = input(f"  {prompt}: ").strip()
         if raw == "" or raw == "0":
@@ -102,9 +105,9 @@ def _pedir_opcion_c(prompt, opciones: list) -> str:
             idx = int(raw)
             if 1 <= idx <= len(opciones):
                 return opciones[idx - 1]
-            print(f"  ! elige entre 0 y {len(opciones)}")
+            print(alerta_txt(f"elige entre 0 y {len(opciones)}"))
         except ValueError:
-            print("  ! ingresa el número de la opción")
+            print(alerta_txt("ingresa el número de la opción"))
 
 # ── REGISTRO DE BATCH ─────────────────────────────────────────────────────────
 
@@ -117,7 +120,7 @@ def registrar_batch():
     batch_id  = siguiente_batch_id(fecha)
     hora      = datetime.now().strftime("%H:%M")
 
-    _titulo(f"REGISTRO DE BATCH — batch {batch_id}  |  {hora}")
+    _titulo(f"registro de batch {batch_id}  |  {hora}")
     print("  [Enter en cualquier paso = cancelar el registro]")
 
     try:
@@ -128,7 +131,7 @@ def registrar_batch():
         for i, (cl, nm) in enumerate(zip(claves, nombres), 1):
             costo = f"  ${provs[cl].costo_kg}/kg" if cl in provs else ""
             print(f"  [{i}] {nm}{costo}")
-        print(f"  [0] cancelar registro")
+        print(opcion_txt("0", "cancelar registro"))
 
         while True:
             raw = input("  proveedor: ").strip()
@@ -139,9 +142,9 @@ def registrar_batch():
                 if 1 <= idx <= len(claves):
                     proveedor = claves[idx - 1]
                     break
-                print(f"  ! elige entre 0 y {len(claves)}")
+                print(alerta_txt(f"elige entre 0 y {len(claves)}"))
             except ValueError:
-                print("  ! ingresa el número")
+                print(alerta_txt("ingresa el número"))
 
         # costo del proveedor — puede haber cambiado hoy
         if proveedor in provs:
@@ -152,7 +155,7 @@ def registrar_batch():
                 provs[proveedor].costo_kg = costo_kg
                 from config import guardar_proveedores
                 guardar_proveedores(provs)
-                print(f"  ✓ precio actualizado a ${costo_kg}/kg")
+                print(ok_txt(f"precio actualizado a ${costo_kg}/kg"))
             else:
                 costo_kg = costo_default
         else:
@@ -234,7 +237,7 @@ def registrar_batch():
     print()
     if _confirmar("  ¿guardar este batch?"):
         guardar_batch(batch)
-        print(f"\n  ✓ batch #{batch_id} guardado\n")
+        print("\n" + ok_txt(f"batch #{batch_id} guardado") + "\n")
         return batch
     else:
         print("\n  ✗ batch descartado\n")
@@ -267,8 +270,8 @@ def menu_registro():
             print("  sin batches registrados hoy")
 
         print()
-        print("  [1] registrar batch")
-        print("  [2] volver al menú principal")
+        print(opcion_txt("1", "registrar batch"))
+        print(opcion_txt("2", "volver al menú principal"))
 
         op = input("  opción: ").strip()
         if op == "1":
@@ -276,7 +279,7 @@ def menu_registro():
         elif op == "2":
             break
         else:
-            print("  ! opción inválida")
+            print(alerta_txt("opción inválida"))
 
 
 if __name__ == "__main__":

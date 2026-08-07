@@ -529,6 +529,30 @@ def c(texto, estilo="texto", negrita=False) -> str:
     return f"\033[{codigo}m{texto}{_RESET}"
 
 
+def esc(estilo="texto", negrita=False) -> str:
+    """
+    Devuelve solo el escape de apertura de un estilo (sin el reset), o ""
+    si la terminal no soporta color. Es para código que arma sus cadenas a
+    mano en vez de envolverlas con c() — así esas cadenas también degradan
+    cuando la salida se redirige a un archivo.
+    """
+    if not _ANSI:
+        return ""
+    par = _CODIGOS.get(estilo)
+    if par is None:
+        return ""
+    codigo = par[1] if _ANSI256 else par[0]
+    return f"\033[{'1;' if negrita else ''}{codigo}m"
+
+
+def esc_negrita() -> str:
+    return "\033[1m" if _ANSI else ""
+
+
+def reset() -> str:
+    return _RESET if _ANSI else ""
+
+
 def sep_txt(char=None, ancho=54, estilo="chrome") -> str:
     """Separador horizontal para los módulos de texto plano."""
     if char is None:

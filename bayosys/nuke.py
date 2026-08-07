@@ -15,6 +15,10 @@ from datetime import datetime
 from config import BASE_DIR, REGISTROS_DIR, CONFIG_FILE, PROV_FILE
 from config import PROVEEDORES_DEFAULT, guardar_config, _guardar_proveedores_raw
 from models import Config
+from estilos import (
+    titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
+    opcion_txt, dato_txt, c,
+)
 
 CREDENCIALES_ADMIN = os.path.join(BASE_DIR, "credenciales_admin.json")
 BACKUPS_DIR         = os.path.join(BASE_DIR, "backups", "factory_reset")
@@ -35,7 +39,7 @@ def verificar_pin_admin(pin_ingresado: str) -> bool:
     (evita un factory reset "gratis" en una instalación sin PIN configurado).
     """
     if not os.path.exists(CREDENCIALES_ADMIN):
-        print("  ! no hay PIN de administrador configurado — reset bloqueado")
+        print(alerta_txt("no hay PIN de administrador configurado — reset bloqueado"))
         return False
     try:
         with open(CREDENCIALES_ADMIN) as f:
@@ -161,7 +165,7 @@ def factory_reset():
         print("  !! reset CANCELADO — no se borró nada\n")
         return
 
-    print(f"  ✓ respaldo guardado en: {ruta_backup}")
+    print(ok_txt(f"respaldo guardado en: {ruta_backup}"))
     print("\n  ejecutando factory reset...")
 
     try:

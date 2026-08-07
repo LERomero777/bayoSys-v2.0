@@ -12,6 +12,10 @@ CAMBIOS:
 """
 
 import os
+from estilos import (
+    banner, titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
+    opcion_txt, dato_txt, c, set_titulo_terminal, aviso_tamano_txt,
+)
 from config import (
     cargar_config, guardar_config,
     cargar_batches, cargar_proveedores, guardar_proveedores,
@@ -28,14 +32,14 @@ from nuke import factory_reset
 
 # ── HELPERS GENERALES ─────────────────────────────────────────────────────────
 
-def _sep(char="═", ancho=54):
-    print(char * ancho)
+def _sep(char=None, ancho=54):
+    print(sep_txt(char, ancho))
 
 def _limpiar():
     os.system("clear")
 
 def _confirmar(prompt) -> bool:
-    return input(f"  {prompt} [s/n]: ").strip().lower() in ("s","si","sí","y")
+    return input(f"  {prompt} {c('[s/n]', 'chrome')}: ").strip().lower() in ("s","si","sí","y")
 
 def _pedir_float(prompt, minimo, maximo) -> float:
     while True:
@@ -43,9 +47,9 @@ def _pedir_float(prompt, minimo, maximo) -> float:
             val = float(input(f"  {prompt}: ").strip())
             if minimo <= val <= maximo:
                 return val
-            print(f"  ! rango válido: {minimo}–{maximo}")
+            print(alerta_txt(f"rango válido: {minimo}–{maximo}"))
         except ValueError:
-            print("  ! ingresa un número")
+            print(alerta_txt("ingresa un número"))
 
 
 # ── HELPERS CANCELABLES — solo para wizards del menú admin ───────────────────
@@ -65,13 +69,13 @@ def _pedir_texto_c(prompt, min_len=1, max_len=30) -> str:
             raise _Cancelado()
         if min_len <= len(val) <= max_len:
             return val
-        print(f"  ! largo válido: {min_len}–{max_len} caracteres")
+        print(alerta_txt(f"largo válido: {min_len}–{max_len} caracteres"))
 
 
 def _pedir_opcion_c(prompt, opciones: list) -> str:
     for i, op in enumerate(opciones, 1):
         print(f"  [{i}] {op}")
-    print(f"  [0] cancelar")
+    print(opcion_txt("0", "cancelar"))
     while True:
         raw = input(f"  {prompt}: ").strip()
         if raw == "" or raw == "0":
@@ -80,9 +84,9 @@ def _pedir_opcion_c(prompt, opciones: list) -> str:
             idx = int(raw)
             if 1 <= idx <= len(opciones):
                 return opciones[idx - 1]
-            print(f"  ! elige entre 0 y {len(opciones)}")
+            print(alerta_txt(f"elige entre 0 y {len(opciones)}"))
         except ValueError:
-            print("  ! ingresa el número de la opción")
+            print(alerta_txt("ingresa el número de la opción"))
 
 
 def _pedir_float_c(prompt, minimo, maximo) -> float:
@@ -94,9 +98,9 @@ def _pedir_float_c(prompt, minimo, maximo) -> float:
             val = float(raw)
             if minimo <= val <= maximo:
                 return val
-            print(f"  ! rango válido: {minimo}–{maximo}")
+            print(alerta_txt(f"rango válido: {minimo}–{maximo}"))
         except ValueError:
-            print("  ! ingresa un número")
+            print(alerta_txt("ingresa un número"))
 
 
 def _pedir_sku_c(prompt) -> str:
@@ -172,28 +176,26 @@ def hay_corte_pendiente(batch_id: str) -> bool:
 
 def hacer_corte_entre_batches(batch_id: str):
     print()
-    _sep("─")
-    print(f"  CORTE DE CAJA — batch #{batch_id}")
-    _sep("─")
+    print(titulo_txt(f"corte de caja — batch #{batch_id}"))
     corte = calcular_corte(batch_id=batch_id)
-    print(f"  tickets del turno : {corte['n_tickets']}")
-    print(f"  ventas efectivo   : ${corte['ventas_efectivo']:,.2f}")
-    print(f"  ventas transfer   : ${corte['ventas_transfer']:,.2f}")
-    print(f"  ventas tarjeta    : ${corte['ventas_tarjeta']:,.2f}")
-    print(f"  ─────────────────────────────────────")
-    print(f"  TOTAL VENTAS      : ${corte['total_ventas']:,.2f}")
-    print(f"  gastos del turno  : ${corte['total_gastos']:,.2f}")
-    print(f"  ─────────────────────────────────────")
-    print(f"  NETO              : ${corte['neto']:,.2f}")
-    print(f"  fondo de caja     : ${corte['fondo_caja']:,.2f}")
-    print(f"  A ENTREGAR        : ${corte['a_entregar']:,.2f}")
+    print(dato_txt("tickets del turno", f"{corte['n_tickets']}"))
+    print(dato_txt("ventas efectivo",   f"${corte['ventas_efectivo']:,.2f}", estilo="ok"))
+    print(dato_txt("ventas transfer",   f"${corte['ventas_transfer']:,.2f}", estilo="ok"))
+    print(dato_txt("ventas tarjeta",    f"${corte['ventas_tarjeta']:,.2f}", estilo="ok"))
+    print(sep_txt("─", 40))
+    print(dato_txt("TOTAL VENTAS",      f"${corte['total_ventas']:,.2f}", estilo="ok"))
+    print(dato_txt("gastos del turno",  f"${corte['total_gastos']:,.2f}", estilo="aviso"))
+    print(sep_txt("─", 40))
+    print(dato_txt("NETO",              f"${corte['neto']:,.2f}", estilo="acento"))
+    print(dato_txt("fondo de caja",     f"${corte['fondo_caja']:,.2f}"))
+    print(dato_txt("A ENTREGAR",        f"${corte['a_entregar']:,.2f}", estilo="ok"))
     print()
     if _confirmar("  ¿confirmar corte?"):
         corte_id = guardar_corte(batch_id, corte)
-        print(f"\n  ✓ corte #{corte_id} guardado\n")
+        print(f"\n{ok_txt(f'corte #{corte_id} guardado')}\n")
         return True
     else:
-        print("\n  ! corte no confirmado — las ventas siguen en el sistema\n")
+        print(f"\n{alerta_txt('corte no confirmado — las ventas siguen en el sistema')}\n")
         return False
 
 
@@ -203,29 +205,27 @@ def menu_config():
     while True:
         cfg = cargar_config()
         _limpiar()
-        _sep()
-        print("  CONFIGURACIÓN — bayoSys")
-        _sep()
-        print(f"  [1] precios de venta")
+        print(titulo_txt("CONFIGURACIÓN — bayoSys"))
+        print(opcion_txt("1", "precios de venta"))
         print(f"       chi público:   ${cfg.precio_chi_pub:.0f}/kg")
         print(f"       chi mayoreo:   ${cfg.precio_chi_may:.0f}/kg")
         print(f"       cubeta 19lt:   ${cfg.precio_mant_cub:.0f}")
         print(f"       litreada 1lt:  ${cfg.precio_mant_lt1:.0f}/env")
         print(f"       litreada ½lt:  ${cfg.precio_mant_lt05:.0f}/env")
-        print(f"  [2] costos laborales")
+        print(opcion_txt("2", "costos laborales"))
         print(f"       destajo:           ${cfg.destajo_kg:.2f}/kg grasa picado")
         print(f"       diario empleado:   ${cfg.diario_empleado:.0f}/día")
-        print(f"  [3] costos operativos")
+        print(opcion_txt("3", "costos operativos"))
         print(f"       leche:             ${cfg.leche_dia:.0f}/día")
         print(f"       costo env 1lt:     ${cfg.costo_env_1lt:.2f}/pza")
         print(f"       costo env 500ml:   ${cfg.costo_env_05lt:.2f}/pza")
         print(f"       gas:               se captura en cierre del día")
-        print(f"  [4] proveedores")
-        print(f"  [5] distribución de costo (alpha/beta)")
+        print(opcion_txt("4", "proveedores"))
+        print(opcion_txt("5", "distribución de costo (alpha/beta)"))
         print(f"       alpha: {cfg.alpha*100:.0f}% → chicharrón")
         print(f"       beta:  {cfg.beta*100:.0f}% → manteca")
-        print(f"  [6] sincronizar precios al POS")
-        print(f"  [7] volver")
+        print(opcion_txt("6", "sincronizar precios al POS"))
+        print(opcion_txt("7", "volver"))
         print()
 
         op = input("  opción: ").strip()
@@ -238,14 +238,14 @@ def menu_config():
             cfg.precio_mant_lt1  = _pedir_float("litreada 1lt $",      20,  80)
             cfg.precio_mant_lt05 = _pedir_float("litreada 500ml $",    10,  50)
             guardar_config(cfg)
-            print("  ✓ precios actualizados")
+            print(ok_txt("precios actualizados"))
 
         elif op == "2":
             print()
             cfg.destajo_kg      = _pedir_float("destajo $/kg grasa picado", 0.5, 10.0)
             cfg.diario_empleado = _pedir_float("diario empleado $/día", 0, 2000)
             guardar_config(cfg)
-            print("  ✓ costos laborales actualizados")
+            print(ok_txt("costos laborales actualizados"))
 
         elif op == "3":
             print()
@@ -253,7 +253,7 @@ def menu_config():
             cfg.costo_env_1lt  = _pedir_float("costo env 1lt $",    0,  20)
             cfg.costo_env_05lt = _pedir_float("costo env 500ml $",  0,  20)
             guardar_config(cfg)
-            print("  ✓ costos operativos actualizados")
+            print(ok_txt("costos operativos actualizados"))
 
         elif op == "4":
             provs = cargar_proveedores()
@@ -266,7 +266,7 @@ def menu_config():
                 nuevo = _pedir_float(f"nuevo costo $/kg para {clave}", 10, 100)
                 provs[clave].costo_kg = nuevo
                 guardar_proveedores(provs)
-                print(f"  ✓ {clave} actualizado a ${nuevo}/kg")
+                print(ok_txt(f"{clave} actualizado a ${nuevo}/kg"))
 
         elif op == "5":
             print()
@@ -274,7 +274,7 @@ def menu_config():
             cfg.alpha = alpha / 100
             cfg.beta  = round(1.0 - cfg.alpha, 10)
             guardar_config(cfg)
-            print(f"  ✓ alpha={cfg.alpha*100:.0f}%  beta={cfg.beta*100:.0f}%")
+            print(ok_txt(f"alpha={cfg.alpha*100:.0f}%  beta={cfg.beta*100:.0f}%"))
 
         elif op == "6":
             try:
@@ -283,9 +283,9 @@ def menu_config():
                 actualizar_precio("M1LT", cfg.precio_mant_lt1)
                 actualizar_precio("M05",  cfg.precio_mant_lt05)
                 actualizar_precio("CUB",  cfg.precio_mant_cub)
-                print("  ✓ precios sincronizados al POS")
+                print(ok_txt("precios sincronizados al POS"))
             except Exception as e:
-                print(f"  ! error sincronizando: {e}")
+                print(alerta_txt(f"error sincronizando: {e}"))
 
         elif op == "7":
             break
@@ -330,7 +330,7 @@ def _alta_producto():
         sku = _pedir_sku_c("SKU (código corto, ej: TORT)")
 
         if get_sku(sku):
-            print(f"  ! el SKU '{sku}' ya existe — usa [2] editar en su lugar")
+            print(alerta_txt(f"el SKU '{sku}' ya existe — usa [2] editar en su lugar"))
             if not _confirmar("  ¿deseas sobreescribirlo de todos modos?"):
                 print("\n  cancelado — nada se modificó\n")
                 return
@@ -383,9 +383,9 @@ def _alta_producto():
     )
 
     if creado:
-        print(f"\n  ✓ producto '{sku}' creado — aparecerá en el POS en tecla [{orden}]")
+        print("\n" + ok_txt(f"producto '{sku}' creado — aparecerá en el POS en tecla [{orden}]"))
     else:
-        print(f"\n  ✓ producto '{sku}' actualizado")
+        print("\n" + ok_txt(f"producto '{sku}' actualizado"))
 
 
 def _editar_producto():
@@ -400,7 +400,7 @@ def _editar_producto():
 
     row = get_sku(sku)
     if not row:
-        print(f"  ! SKU '{sku}' no existe")
+        print(alerta_txt(f"SKU '{sku}' no existe"))
         return
 
     print(f"\n  editando: {row['descripcion']}  (${row['precio_venta']:.2f})")
@@ -417,14 +417,14 @@ def _editar_producto():
         try:
             cambios["precio_venta"] = float(nuevo_precio)
         except ValueError:
-            print("  ! precio inválido, se ignora")
+            print(alerta_txt("precio inválido, se ignora"))
 
     nuevo_orden = input(f"  orden menú [{row['orden_menu']}]: ").strip()
     if nuevo_orden:
         try:
             cambios["orden_menu"] = int(nuevo_orden)
         except ValueError:
-            print("  ! orden inválido, se ignora")
+            print(alerta_txt("orden inválido, se ignora"))
 
     if not cambios:
         print("\n  sin cambios — cancelado")
@@ -438,7 +438,7 @@ def _editar_producto():
         return
 
     editar_sku(sku, **cambios)
-    print(f"\n  ✓ '{sku}' actualizado: {list(cambios.keys())}")
+    print("\n" + ok_txt(f"'{sku}' actualizado: {list(cambios.keys())}"))
 
 
 def _baja_producto():
@@ -453,7 +453,7 @@ def _baja_producto():
 
     row = get_sku(sku)
     if not row:
-        print(f"  ! SKU '{sku}' no existe")
+        print(alerta_txt(f"SKU '{sku}' no existe"))
         return
 
     print(f"\n  producto: {row['descripcion']}  stock actual: {row['stock']}")
@@ -463,9 +463,9 @@ def _baja_producto():
 
     try:
         desactivar_sku(sku)
-        print(f"\n  ✓ '{sku}' desactivado — ya no aparece en el POS")
+        print("\n" + ok_txt(f"'{sku}' desactivado — ya no aparece en el POS"))
     except ValueError as e:
-        print(f"\n  ! {e}")
+        print("\n" + alerta_txt(f"{e}"))
 
 
 def _reactivar_producto():
@@ -480,7 +480,7 @@ def _reactivar_producto():
 
     row = get_sku(sku)
     if not row:
-        print(f"  ! SKU '{sku}' no existe")
+        print(alerta_txt(f"SKU '{sku}' no existe"))
         return
 
     if not _confirmar(f"  ¿reactivar '{row['descripcion']}'?"):
@@ -488,22 +488,20 @@ def _reactivar_producto():
         return
 
     reactivar_sku(sku)
-    print(f"\n  ✓ '{sku}' reactivado — vuelve a aparecer en el POS")
+    print("\n" + ok_txt(f"'{sku}' reactivado — vuelve a aparecer en el POS"))
 
 
 def menu_administracion():
     while True:
         _limpiar()
-        _sep()
-        print("  ADMINISTRACIÓN — Catálogo de productos POS")
-        _sep()
+        print(titulo_txt("ADMINISTRACIÓN — Catálogo de productos POS"))
         _mostrar_catalogo()
         _sep("─")
-        print("  [1] alta de producto nuevo")
-        print("  [2] editar producto")
-        print("  [3] desactivar producto")
-        print("  [4] reactivar producto")
-        print("  [5] volver")
+        print(opcion_txt("1", "alta de producto nuevo"))
+        print(opcion_txt("2", "editar producto"))
+        print(opcion_txt("3", "desactivar producto"))
+        print(opcion_txt("4", "reactivar producto"))
+        print(opcion_txt("5", "volver"))
         print()
 
         op = input("  opción: ").strip()
@@ -523,7 +521,7 @@ def menu_administracion():
         elif op == "5":
             break
         else:
-            print("  ! opción inválida")
+            print(alerta_txt("opción inválida"))
             input("  Enter para continuar...")
 
 
@@ -540,7 +538,7 @@ def flujo_registrar_batch():
     if batch_activo and hay_corte_pendiente(batch_activo):
         print()
         _sep("─")
-        print(f"  ! hay ventas sin corte del batch #{batch_activo}")
+        print(alerta_txt(f"hay ventas sin corte del batch #{batch_activo}"))
         print(f"    debes hacer el corte antes de registrar un nuevo batch")
         _sep("─")
         hacer_corte_entre_batches(batch_activo)
@@ -554,7 +552,7 @@ def flujo_registrar_batch():
     try:
         from pos import cargar_produccion
         res = cargar_produccion(batch, cargar_config())
-        print(f"  ✓ inventario POS: {res['mensaje']}")
+        print(ok_txt(f"inventario POS: {res['mensaje']}"))
         if res["cubetas_emitidas"] > 0:
             print(f"    {res['pool_antes']:.2f}lt acumulados + {res['lt_ingresados']:.2f}lt "
                   f"del batch → {res['cubetas_emitidas']:.0f} cubeta"
@@ -563,7 +561,7 @@ def flujo_registrar_batch():
         else:
             print(f"    {res['pool_despues']:.2f}lt a granel — aún no completa una cubeta")
     except Exception as e:
-        print(f"  ! error cargando producción al POS: {e}")
+        print(alerta_txt(f"error cargando producción al POS: {e}"))
 
     print()
     if _confirmar(f"  ¿abrir el POS para el batch #{batch.id}?"):
@@ -582,13 +580,14 @@ def _abrir_pos(batch_id: str):
         set_batch_activo(batch_id)
         iniciar_pos_tui(batch_id=batch_id, operador="Luis")
     except Exception as e:
-        print(f"\n  ! error al abrir el POS: {e}\n")
+        print("\n" + alerta_txt(f"error al abrir el POS: {e}") + "\n")
         input("  Enter para continuar...")
 
 
 # ── MENÚ PRINCIPAL ───────────────────────────────────────────────────────────
 
 def main():
+    set_titulo_terminal()
     init_db()
     verificar_integridad()   # ← audita días anteriores antes del menú
 
@@ -599,27 +598,29 @@ def main():
         estado       = _estado_hoy()
         batch_activo = get_batch_activo()
 
-        _sep()
-        print("  bayoSys · Productos El Bayo")
-        _sep("─")
-        print(f"  {fecha}  |  {estado}")
+        print(banner())
+        print()
+        print(f"  {c(fecha, 'dato')}   {c(estado, 'chrome')}")
         if batch_activo:
-            print(f"  POS activo: batch #{batch_activo}")
-        _sep()
+            print(f"  {c('POS activo', 'ok', negrita=True)}  batch #{batch_activo}")
+        aviso = aviso_tamano_txt()
+        if aviso:
+            print(aviso)
+        print(" " + sep_txt(ancho=59))   # alineado con el ancho del banner
         print()
-        print("  [1] registrar batch")
-        print("  [2] POS — punto de venta")
-        print("  [3] cierre del día")
-        print("  [4] análisis y reportes")
-        print("  [5] simulador de escenarios")
-        print("  [6] configuración")
-        print("  [7] administración — catálogo POS")
-        print("  [8] factory reset")
+        print(opcion_txt(1, "registrar batch"))
+        print(opcion_txt(2, "POS — punto de venta"))
+        print(opcion_txt(3, "cierre del día"))
+        print(opcion_txt(4, "análisis y reportes"))
+        print(opcion_txt(5, "simulador de escenarios"))
+        print(opcion_txt(6, "configuración"))
+        print(opcion_txt(7, "administración — catálogo POS"))
+        print(opcion_txt(8, "factory reset", "alerta"))
         print()
-        print("  [0] salir")
+        print(opcion_txt(0, "salir", "chrome"))
         print()
 
-        op = input("  opción: ").strip()
+        op = input(f"  {c('opción', 'acento', negrita=True)}: ").strip()
 
         if op == "1":
             _limpiar()
@@ -634,7 +635,7 @@ def main():
                 fecha   = fecha_hoy()
                 batches = cargar_batches(fecha)
                 if not batches:
-                    print("\n  ! no hay batches registrados hoy")
+                    print("\n" + alerta_txt("no hay batches registrados hoy"))
                     print("  registra un batch primero\n")
                     input("  Enter para continuar...")
                 else:
@@ -653,10 +654,10 @@ def main():
                         if 1 <= idx <= len(batches):
                             _abrir_pos(batches[idx - 1].id)
                         else:
-                            print("  ! opción fuera de rango")
+                            print(alerta_txt("opción fuera de rango"))
                             input("  Enter para continuar...")
                     except ValueError:
-                        print("  ! ingresa un número")
+                        print(alerta_txt("ingresa un número"))
                         input("  Enter para continuar...")
         elif op == "3":
             _limpiar()
@@ -683,7 +684,7 @@ def main():
             break
 
         else:
-            print("  ! opción inválida")
+            print(alerta_txt("opción inválida"))
             input("  Enter para continuar...")
 
 
