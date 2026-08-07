@@ -212,6 +212,8 @@ _CAJA_UNICODE = {
     "h": "─", "v": "│", "tl": "┌", "tr": "┐", "bl": "└", "br": "┘",
     "t": "┬", "b": "┴", "l": "├", "r": "┤", "x": "┼",
     "H": "━", "V": "┃", "TL": "┏", "TR": "┓", "BL": "┗", "BR": "┛",
+    "T_ABAJO": "┳", "T_ARRIBA": "┻", "T_IZQ": "┨",
+    "l_pesado": "┠", "r_pesado": "┨",
     "cap_i": "╸", "cap_d": "╺",
 }
 
@@ -219,6 +221,8 @@ _CAJA_ASCII = {
     "h": "-", "v": "|", "tl": "+", "tr": "+", "bl": "+", "br": "+",
     "t": "+", "b": "+", "l": "+", "r": "+", "x": "+",
     "H": "=", "V": "|", "TL": "+", "TR": "+", "BL": "+", "BR": "+",
+    "T_ABAJO": "+", "T_ARRIBA": "+", "T_IZQ": "+",
+    "l_pesado": "+", "r_pesado": "+",
     "cap_i": " ", "cap_d": " ",
 }
 
@@ -315,13 +319,25 @@ def caja(win, y, x, alto, ancho, titulo="", attr=None, attr_titulo=None):
     if attr_titulo is None:
         attr_titulo = ACENTO() | curses.A_BOLD
 
+    w = win.getmaxyx()[1]
     interno = ancho - 2
-    sadd(win, y, x, CAJA["tl"] + CAJA["h"] * interno + CAJA["tr"], attr)
+    borde_der = x + ancho - 1
+
+    def _der(fila, ch):
+        # si el borde derecho cae en la última columna, addstr no alcanza
+        if borde_der >= w - 1:
+            _addch_final(win, fila, ch, attr)
+        else:
+            sadd(win, fila, borde_der, ch, attr)
+
+    sadd(win, y, x, CAJA["tl"] + CAJA["h"] * interno, attr)
+    _der(y, CAJA["tr"])
     for i in range(1, alto - 1):
-        sadd(win, y + i, x,             CAJA["v"], attr)
-        sadd(win, y + i, x + ancho - 1, CAJA["v"], attr)
-        sadd(win, y + i, x + 1,         " " * interno)
-    sadd(win, y + alto - 1, x, CAJA["bl"] + CAJA["h"] * interno + CAJA["br"], attr)
+        sadd(win, y + i, x,     CAJA["v"], attr)
+        sadd(win, y + i, x + 1, " " * interno)
+        _der(y + i, CAJA["v"])
+    sadd(win, y + alto - 1, x, CAJA["bl"] + CAJA["h"] * interno, attr)
+    _der(y + alto - 1, CAJA["br"])
 
     if titulo:
         etiqueta = f" {titulo.upper()} "
@@ -329,13 +345,60 @@ def caja(win, y, x, alto, ancho, titulo="", attr=None, attr_titulo=None):
             sadd(win, y, x + 2, etiqueta, attr_titulo)
 
 
-def divisor(win, y, x, ancho, attr=None):
-    """División interna de un panel — trazo fino con remates en los extremos."""
+def divisor(win, y, x, ancho, attr=None, pesado=True):
+    """
+    División interna de trazo fino con remates que empalman con el borde.
+
+    `pesado` dice contra qué borde empalman los extremos: los paneles llevan
+    marco grueso (┠ ┨) y los modales marco fino (├ ┤). Usar el remate
+    equivocado deja una muesca visible en la unión.
+    """
     if attr is None:
         attr = CHROME()
-    sadd(win, y, x,             CAJA["l"], attr)
-    sadd(win, y, x + 1,         CAJA["h"] * max(0, ancho - 2), attr)
-    sadd(win, y, x + ancho - 1, CAJA["r"], attr)
+    izq = CAJA["l_pesado"] if pesado else CAJA["l"]
+    der = CAJA["r_pesado"] if pesado else CAJA["r"]
+    w = win.getmaxyx()[1]
+    sadd(win, y, x, izq + CAJA["h"] * max(0, ancho - 2), attr)
+    if x + ancho - 1 >= w - 1:
+        _addch_final(win, y, der, attr)
+    else:
+        sadd(win, y, x + ancho - 1, der, attr)
+
+
+def encabezado(win, titulo, derecha=""):
+    """
+    Barra de título de una pantalla completa: nombre a la izquierda, dato de
+    contexto a la derecha, trazo grueso debajo. Las pantallas que ocupan
+    todo el lienzo usan esto en vez de marco() — no llevan borde lateral,
+    así que la jerarquía la da la barra.
+    """
+    w = win.getmaxyx()[1]
+    sadd(win, 0, 0, " " * (w - 1))
+    sadd(win, 0, 2, titulo.upper(), TITULO())
+    if derecha:
+        sadd(win, 0, max(0, w - len(derecha) - 2), derecha, CHROME())
+    sadd(win, 1, 0, CAJA["H"] * (w - 1), CHROME())
+
+
+def pie(win, *teclas, fila=None):
+    """
+    Barra inferior de teclas disponibles. Cada elemento es (tecla, descripción);
+    la tecla se resalta y la descripción va apagada, para que el ojo encuentre
+    la letra sin leer la frase completa.
+    """
+    h, w = win.getmaxyx()
+    y = (h - 2) if fila is None else fila
+    sadd(win, y - 1, 0, CAJA["H"] * (w - 1), CHROME())
+    sadd(win, y, 0, " " * (w - 1))
+    x = 2
+    for tecla, desc in teclas:
+        etiqueta = f"[{tecla}]"
+        if x + len(etiqueta) + len(desc) + 3 >= w:
+            break
+        sadd(win, y, x, etiqueta, ACENTO() | curses.A_BOLD)
+        x += len(etiqueta) + 1
+        sadd(win, y, x, desc, CHROME())
+        x += len(desc) + 3
 
 
 # ── LIENZO DE TAMAÑO FIJO ────────────────────────────────────────────────────
