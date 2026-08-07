@@ -58,6 +58,16 @@ TITULO_VENTANA = "bayoSys · Productos El Bayo"
 N_COLORES = 8          # se actualiza en init_colors() con lo que reporte curses
 
 
+# curses codifica lo que se dibuja usando el locale del proceso. Sin este
+# setlocale, Python arranca en locale "C" y los caracteres de caja pueden
+# salir mal aunque la terminal sí sea UTF-8. Se hace acá, al importar el
+# módulo de estilos, porque es el que decide qué caracteres se dibujan.
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except locale.Error:
+    pass    # locale no instalado en el sistema — se sigue con el default
+
+
 def _soporta_unicode() -> bool:
     """True si la terminal puede dibujar caracteres de caja Unicode."""
     enc = (locale.getpreferredencoding(False) or "").lower()
