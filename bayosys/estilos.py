@@ -629,13 +629,20 @@ def dato_txt(label, valor, ancho_label=20, estilo="dato") -> str:
 
 # ── BANNER ───────────────────────────────────────────────────────────────────
 
-# Wordmark de 2 renglones. La versión anterior eran 6 renglones de 59
-# columnas: ocupaba un cuarto de la pantalla de arranque y empujaba el menú
-# fuera del centro. Esta mide 25×2 y deja sitio para que el bloque completo
-# —banner, estado y menú— quepa centrado en la ventana.
+# Wordmark de 3 renglones en caracteres de caja doble — la misma familia
+# tipográfica que los marcos del POS, así el logo y la interfaz se ven del
+# mismo sistema.
+#
+# POR QUÉ 3 RENGLONES Y NO 2
+#   La versión de 2 renglones con medios bloques se leía "DAYOSYS": en dos
+#   renglones la B no tiene dónde poner la barra del medio, así que su perfil
+#   queda idéntico al de una D. Tres renglones le dan un renglón propio a esa
+#   barra (╠), que es lo único que distingue B de D. El original de 6
+#   renglones sí era legible pero medía 59 columnas; este mide 21.
 _BANNER_COMPACTO = [
-    "█▀▄ ▄▀█ █▄█ █▀█ █▀ █▄█ █▀",
-    "█▄▀ █▀█  █  █▄█ ▄█  █  ▄█",
+    "╔╗ ╔═╗╦ ╦╔═╗╔═╗╦ ╦╔═╗",
+    "╠╩╗╠═╣╚╦╝║ ║╚═╗╚╦╝╚═╗",
+    "╚═╝╩ ╩ ╩ ╚═╝╚═╝ ╩ ╚═╝",
 ]
 
 

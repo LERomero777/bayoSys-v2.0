@@ -784,7 +784,9 @@ def _texto_ticker_mayoreo() -> str:
     ordenados por prioridad (ya vienen así desde get_pedidos_mayoreo_pendientes)."""
     pedidos = get_pedidos_mayoreo_pendientes()
     if not pedidos:
-        return "  cola de mayoreo despejada  »  "
+        # cadena vacía = no hay nada que desplazar. La cinta pone un aviso
+        # fijo en vez de repetir la misma frase dando vueltas.
+        return ""
 
     marcador = {"muy_alta": "●●●", "alta": "●●", "media": "●", "baja": "·"}
     partes = []
@@ -794,9 +796,44 @@ def _texto_ticker_mayoreo() -> str:
         partes.append(f"{m} {p['cliente_nombre']} — {p['kg']:.1f}kg — ${total:,.0f}")
     return "   »   ".join(partes) + "   »   "
 
+# ── CINTA DE MAYOREO ─────────────────────────────────────────────────────────
+
+ETIQUETA_TICKER = " MAYOREO "
+
+
+def draw_ticker(stdscr, ticker_offset: int = 0):
+    """
+    Cinta superior con los pedidos de mayoreo pendientes, desplazándose a lo
+    ancho de la pantalla.
+
+    Antes vivía en el hueco que sobraba a la derecha de la barra de estado, y
+    ese hueco se lo comían las cifras del turno: con un batch cargado el
+    ticker quedaba en 6 u 8 columnas, ilegible. Acá arriba tiene el ancho
+    completo y es lo primero que se ve al abrir el POS, que es lo que
+    corresponde a una cola de pedidos por surtir.
+    """
+    w = stdscr.getmaxyx()[1]
+    sadd(stdscr, 0, 0, " " * (w - 1), TAB())
+    sadd(stdscr, 0, 0, ETIQUETA_TICKER, WARN())
+
+    x = len(ETIQUETA_TICKER) + 1
+    ancho = w - x - 1
+    if ancho <= 0:
+        return
+
+    texto = _texto_ticker_mayoreo()
+    if not texto:
+        sadd(stdscr, 0, x, "cola despejada — sin pedidos pendientes", TAB())
+        return
+    # el texto se repite para que el scroll no muestre cortes al dar la vuelta
+    doble  = texto * (ancho // len(texto) + 3)
+    offset = ticker_offset % len(texto)
+    sadd(stdscr, 0, x, doble[offset: offset + ancho], TAB())
+
+
 # ── BARRA DE ESTADO ───────────────────────────────────────────────────────────
 
-def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = "", ticker_offset: int = 0):
+def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = ""):
     h, w = stdscr.getmaxyx()
     try:
         resumen = get_resumen_turno(sesion.batch_id)
@@ -811,17 +848,6 @@ def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = "", ticker_offset: int 
 
     sadd(stdscr, h - 1, 0, " " * (w - 1), TAB())
     sadd(stdscr, h - 1, 0, status[:w - 1], TAB())
-
-    # ── ticker de mayoreo — pinta en el espacio libre a la derecha del status ──
-    ticker_x = len(status) + 3
-    if ticker_x < w - 5:
-        ancho_ticker = w - ticker_x - 1
-        texto = _texto_ticker_mayoreo()
-        # duplicar el texto para que el scroll se vea continuo (loop sin cortes)
-        doble = texto * (ancho_ticker // max(len(texto), 1) + 3)
-        offset = ticker_offset % len(texto) if texto else 0
-        visible = doble[offset: offset + ancho_ticker]
-        sadd(stdscr, h - 1, ticker_x, visible, TAB() | curses.A_BOLD)
 
     # renglón de mensajes — propio, arriba de la barra de estado.
     # Los mensajes de error del POS vienen prefijados con "!" desde
@@ -928,18 +954,21 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
         # leer menú dinámico desde DB en cada frame
         menu = list(get_menu_pos())
 
-        # layout vertical: paneles arriba, renglón de mensajes, barra de estado.
-        # El renglón de mensajes es propio — antes el mensaje se escribía sobre
-        # el borde inferior de los paneles y se lo comía.
-        alto_paneles = h - 2
+        # layout vertical, de arriba a abajo:
+        #   fila 0        cinta de mayoreo
+        #   1 .. h-3      paneles
+        #   h-2           renglón de mensajes
+        #   h-1           barra de estado
+        Y_PANELES    = 1
+        alto_paneles = h - 3
 
         # los dos paneles comparten la columna del medio: el panel derecho
         # arranca una columna antes y su borde izquierdo se dibuja encima del
         # derecho del izquierdo, para que quede un solo trazo vertical
         ancho_izq = min(ANCHO_PANEL_IZQ, w // 2)
         x_union   = ancho_izq - 1
-        win_izq   = stdscr.derwin(alto_paneles, ancho_izq,   0, 0)
-        win_der   = stdscr.derwin(alto_paneles, w - x_union, 0, x_union)
+        win_izq   = stdscr.derwin(alto_paneles, ancho_izq,   Y_PANELES, 0)
+        win_der   = stdscr.derwin(alto_paneles, w - x_union, Y_PANELES, x_union)
 
         # inventario para stock
         inv_raw  = get_estado_inventario()
@@ -951,13 +980,15 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
 
         # remates de la columna compartida: sin esto quedan dos esquinas
         # encimadas arriba y abajo, y las divisiones del panel izquierdo
-        # terminan contra el borde del derecho en vez de empalmar con él
-        sadd(stdscr, 0,                x_union, CAJA["T_ABAJO"],  CHROME())
-        sadd(stdscr, alto_paneles - 1, x_union, CAJA["T_ARRIBA"], CHROME())
+        # terminan contra el borde del derecho en vez de empalmar con él.
+        # Las filas vienen en coordenadas del panel, así que llevan el offset.
+        sadd(stdscr, Y_PANELES,                    x_union, CAJA["T_ABAJO"],  ACENTO())
+        sadd(stdscr, Y_PANELES + alto_paneles - 1, x_union, CAJA["T_ARRIBA"], ACENTO())
         for fila in filas_div:
-            sadd(stdscr, fila, x_union, CAJA["T_IZQ"], CHROME())
+            sadd(stdscr, Y_PANELES + fila, x_union, CAJA["T_IZQ"], CHROME())
 
-        draw_statusbar(stdscr, sesion, msg, ticker_offset)
+        draw_ticker(stdscr, ticker_offset)
+        draw_statusbar(stdscr, sesion, msg)
         ticker_offset += 1
         stdscr.refresh()
         msg = ""
