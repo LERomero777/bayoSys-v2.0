@@ -17,7 +17,7 @@ from config import PROVEEDORES_DEFAULT, guardar_config, _guardar_proveedores_raw
 from models import Config
 from estilos import (
     titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
-    opcion_txt, dato_txt, c,
+    opcion_txt, dato_txt, c, imprimir, pedir,
 )
 
 CREDENCIALES_ADMIN = os.path.join(BASE_DIR, "credenciales_admin.json")
@@ -39,7 +39,7 @@ def verificar_pin_admin(pin_ingresado: str) -> bool:
     (evita un factory reset "gratis" en una instalación sin PIN configurado).
     """
     if not os.path.exists(CREDENCIALES_ADMIN):
-        print(alerta_txt("no hay PIN de administrador configurado — reset bloqueado"))
+        imprimir(alerta_txt("no hay PIN de administrador configurado — reset bloqueado"))
         return False
     try:
         with open(CREDENCIALES_ADMIN) as f:
@@ -134,48 +134,48 @@ def factory_reset():
     Doble confirmación: texto "NUKE" + PIN de administrador.
     Respaldo automático antes de cualquier borrado.
     """
-    print()
-    print("═" * 54)
-    print("  ☢  FACTORY RESET  ☢")
-    print("═" * 54)
-    print("  Esto borrará TODOS los batches, cierres, tickets,")
-    print("  inventario, configuración y catálogo POS.")
-    print("  El catálogo volverá a los SKUs de fábrica")
-    print("  (CHI, M1LT, M05, CHO, CUB, LIB) — cualquier producto")
-    print("  agregado manualmente se pierde y debe rehacerse.")
-    print()
-    print("  Se creará un respaldo completo antes de borrar nada.")
-    print()
+    imprimir()
+    imprimir("═" * 54)
+    imprimir("  ☢  FACTORY RESET  ☢")
+    imprimir("═" * 54)
+    imprimir("  Esto borrará TODOS los batches, cierres, tickets,")
+    imprimir("  inventario, configuración y catálogo POS.")
+    imprimir("  El catálogo volverá a los SKUs de fábrica")
+    imprimir("  (CHI, M1LT, M05, CHO, CUB, LIB) — cualquier producto")
+    imprimir("  agregado manualmente se pierde y debe rehacerse.")
+    imprimir()
+    imprimir("  Se creará un respaldo completo antes de borrar nada.")
+    imprimir()
 
-    confirm = input('  escribe "NUKE" para continuar: ').strip()
+    confirm = pedir('  escribe "NUKE" para continuar: ').strip()
     if confirm != "NUKE":
-        print("\n  ✗ cancelado — nada se modificó\n")
+        imprimir("\n  ✗ cancelado — nada se modificó\n")
         return
 
-    pin = input("  PIN de administrador: ").strip()
+    pin = pedir("  PIN de administrador: ").strip()
     if not verificar_pin_admin(pin):
-        print("\n  ✗ PIN incorrecto — reset bloqueado\n")
+        imprimir("\n  ✗ PIN incorrecto — reset bloqueado\n")
         return
 
-    print("\n  creando respaldo...")
+    imprimir("\n  creando respaldo...")
     try:
         ruta_backup = _respaldar_todo()
     except Exception as e:
-        print(f"\n  !! ERROR AL RESPALDAR: {e}")
-        print("  !! reset CANCELADO — no se borró nada\n")
+        imprimir(f"\n  !! ERROR AL RESPALDAR: {e}")
+        imprimir("  !! reset CANCELADO — no se borró nada\n")
         return
 
-    print(ok_txt(f"respaldo guardado en: {ruta_backup}"))
-    print("\n  ejecutando factory reset...")
+    imprimir(ok_txt(f"respaldo guardado en: {ruta_backup}"))
+    imprimir("\n  ejecutando factory reset...")
 
     try:
         _ejecutar_reset()
     except Exception as e:
-        print(f"\n  !! ERROR durante el reset: {e}")
-        print(f"  !! el respaldo sigue disponible en: {ruta_backup}\n")
+        imprimir(f"\n  !! ERROR durante el reset: {e}")
+        imprimir(f"  !! el respaldo sigue disponible en: {ruta_backup}\n")
         return
 
-    print("\n  ☢ purga completa — sistema en estado de fábrica ☢")
-    print(f"  respaldo previo disponible en: {ruta_backup}")
-    print()
+    imprimir("\n  ☢ purga completa — sistema en estado de fábrica ☢")
+    imprimir(f"  respaldo previo disponible en: {ruta_backup}")
+    imprimir()
 

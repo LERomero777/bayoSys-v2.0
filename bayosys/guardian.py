@@ -19,7 +19,7 @@ from config import cargar_batches, fechas_con_registro, fecha_hoy, cargar_config
 from cierre import cargar_cierre
 from pos_db import tiene_corte_guardado, calcular_corte, guardar_corte
 from estilos import (
-    esc, esc_negrita, reset, sep_txt, CAJA,
+    esc, esc_negrita, reset, sep_txt, CAJA, imprimir, pedir,
 )
 
 
@@ -41,25 +41,25 @@ RST = reset()
 def _sep(char=None, ancho=54, color=C):
     if char is None:
         char = CAJA["H"]
-    print(f"{color}{char * ancho}{RST}")
+    imprimir(f"{color}{char * ancho}{RST}")
 
 def _titulo(texto, color=R):
-    print()
+    imprimir()
     _sep(CAJA["lleno"], color=color)
-    print(f"{color}{B}  {texto}{RST}")
+    imprimir(f"{color}{B}  {texto}{RST}")
     _sep(CAJA["lleno"], color=color)
 
 def _ok(texto):
-    print(f"  {G}✓{RST}  {texto}")
+    imprimir(f"  {G}✓{RST}  {texto}")
 
 def _warn(texto):
-    print(f"  {Y}!{RST}  {texto}")
+    imprimir(f"  {Y}!{RST}  {texto}")
 
 def _err(texto):
-    print(f"  {R}!!{RST} {texto}")
+    imprimir(f"  {R}!!{RST} {texto}")
 
 def _info(texto):
-    print(f"  {C}·{RST}  {DIM}{texto}{RST}")
+    imprimir(f"  {C}·{RST}  {DIM}{texto}{RST}")
 
 
 # ── DETECCIÓN DE DEUDA ────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ def auditar_dias_pendientes() -> list[dict]:
 def _resolver_corte_caja(fecha: str, batch_ids: list[int]):
     """
     Muestra y guarda el corte de caja para cada batch pendiente del día.
-    Flujo no-curses — usa input() simple.
+    Flujo no-curses — usa pedir() simple.
     """
     for batch_id in batch_ids:
         corte = calcular_corte(batch_id=batch_id)
@@ -142,24 +142,24 @@ def _resolver_corte_caja(fecha: str, batch_ids: list[int]):
             _ok(f"batch #{batch_id} cortado (vacío)")
             continue
 
-        print()
+        imprimir()
         _sep("─", color=Y)
-        print(f"  {Y}{B}CORTE DE CAJA — batch #{batch_id}  [{fecha}]{RST}")
+        imprimir(f"  {Y}{B}CORTE DE CAJA — batch #{batch_id}  [{fecha}]{RST}")
         _sep("─", color=Y)
-        print(f"  {DIM}tickets del turno{RST}  : {corte['n_tickets']}")
-        print(f"  {G}ventas efectivo  {RST}  : ${corte['ventas_efectivo']:,.2f}")
-        print(f"  {G}ventas transfer  {RST}  : ${corte['ventas_transfer']:,.2f}")
-        print(f"  {G}ventas tarjeta   {RST}  : ${corte['ventas_tarjeta']:,.2f}")
+        imprimir(f"  {DIM}tickets del turno{RST}  : {corte['n_tickets']}")
+        imprimir(f"  {G}ventas efectivo  {RST}  : ${corte['ventas_efectivo']:,.2f}")
+        imprimir(f"  {G}ventas transfer  {RST}  : ${corte['ventas_transfer']:,.2f}")
+        imprimir(f"  {G}ventas tarjeta   {RST}  : ${corte['ventas_tarjeta']:,.2f}")
         _sep("─", ancho=44, color=DIM)
-        print(f"  {B}TOTAL VENTAS     {RST}  : {G}${corte['total_ventas']:,.2f}{RST}")
-        print(f"  {Y}gastos del turno {RST}  : ${corte['total_gastos']:,.2f}")
+        imprimir(f"  {B}TOTAL VENTAS     {RST}  : {G}${corte['total_ventas']:,.2f}{RST}")
+        imprimir(f"  {Y}gastos del turno {RST}  : ${corte['total_gastos']:,.2f}")
         _sep("─", ancho=44, color=DIM)
-        print(f"  {B}NETO             {RST}  : {C}${corte['neto']:,.2f}{RST}")
-        print(f"  {DIM}fondo de caja    {RST}  : ${corte['fondo_caja']:,.2f}")
-        print(f"  {B}A ENTREGAR       {RST}  : {G}${corte['a_entregar']:,.2f}{RST}")
-        print()
+        imprimir(f"  {B}NETO             {RST}  : {C}${corte['neto']:,.2f}{RST}")
+        imprimir(f"  {DIM}fondo de caja    {RST}  : ${corte['fondo_caja']:,.2f}")
+        imprimir(f"  {B}A ENTREGAR       {RST}  : {G}${corte['a_entregar']:,.2f}{RST}")
+        imprimir()
 
-        resp = input(f"  {C}[Enter]{RST} confirmar corte  "
+        resp = pedir(f"  {C}[Enter]{RST} confirmar corte  "
                      f"{Y}[s]{RST} saltar por ahora : ").strip().lower()
 
         if resp in ("s", "skip"):
@@ -176,14 +176,14 @@ def _resolver_cierre_produccion(fecha: str):
     El guardian no reimplementa la lógica — solo orquesta.
     """
     from cierre import registrar_cierre as _rc
-    print()
+    imprimir()
     _sep("─", color=Y)
-    print(f"  {Y}{B}CIERRE DE PRODUCCIÓN — {fecha}{RST}")
+    imprimir(f"  {Y}{B}CIERRE DE PRODUCCIÓN — {fecha}{RST}")
     _sep("─", color=Y)
-    print(f"  {DIM}Este día no tiene cierre de producción registrado.{RST}")
-    print(f"  {DIM}Ingresa las ventas reales para cuadrar el día.{RST}")
-    print()
-    resp = input(f"  {C}[Enter]{RST} registrar cierre  "
+    imprimir(f"  {DIM}Este día no tiene cierre de producción registrado.{RST}")
+    imprimir(f"  {DIM}Ingresa las ventas reales para cuadrar el día.{RST}")
+    imprimir()
+    resp = pedir(f"  {C}[Enter]{RST} registrar cierre  "
                  f"{Y}[s]{RST} saltar por ahora : ").strip().lower()
     if resp not in ("s", "skip"):
         _rc()
@@ -197,11 +197,11 @@ def resolver_deuda_interactivo(deudas: list[dict]):
     """
     os.system("clear")
     _titulo("⚠  ALERTA DE INTEGRIDAD  ⚠", color=R)
-    print()
-    print(f"  {R}{B}Se detectaron días sin cerrar correctamente.{RST}")
-    print(f"  {DIM}El sistema requiere que todos los días anteriores{RST}")
-    print(f"  {DIM}tengan corte de caja Y cierre de producción.{RST}")
-    print()
+    imprimir()
+    imprimir(f"  {R}{B}Se detectaron días sin cerrar correctamente.{RST}")
+    imprimir(f"  {DIM}El sistema requiere que todos los días anteriores{RST}")
+    imprimir(f"  {DIM}tengan corte de caja Y cierre de producción.{RST}")
+    imprimir()
 
     for i, deuda in enumerate(deudas, 1):
         fecha      = deuda['fecha']
@@ -209,7 +209,7 @@ def resolver_deuda_interactivo(deudas: list[dict]):
         sin_corte  = deuda['batches_sin_corte']
 
         _sep("─", color=R)
-        print(f"  {R}{B}[{i}/{len(deudas)}]{RST}  {B}{fecha}{RST}  —  "
+        imprimir(f"  {R}{B}[{i}/{len(deudas)}]{RST}  {B}{fecha}{RST}  —  "
               f"{n_batches} batch(es)")
 
         if deuda['falta_corte_caja']:
@@ -218,13 +218,13 @@ def resolver_deuda_interactivo(deudas: list[dict]):
         if deuda['falta_cierre_prod']:
             _err("cierre de producción no registrado")
 
-        print()
-        resp = input(f"  {C}[Enter]{RST} resolver ahora  "
+        imprimir()
+        resp = pedir(f"  {C}[Enter]{RST} resolver ahora  "
                      f"{Y}[s]{RST} saltar  "
                      f"{R}[q]{RST} salir del sistema : ").strip().lower()
 
         if resp == "q":
-            print(f"\n  {R}Sistema detenido — resuelve los cierres pendientes.{RST}\n")
+            imprimir(f"\n  {R}Sistema detenido — resuelve los cierres pendientes.{RST}\n")
             raise SystemExit(0)
 
         if resp in ("s", "skip"):
@@ -232,7 +232,7 @@ def resolver_deuda_interactivo(deudas: list[dict]):
             continue
 
         os.system("clear")
-        print(f"\n  {C}{B}Resolviendo: {fecha}{RST}\n")
+        imprimir(f"\n  {C}{B}Resolviendo: {fecha}{RST}\n")
 
         # 1. Cortes de caja primero (más críticos — dinero)
         if deuda['falta_corte_caja']:
@@ -245,15 +245,15 @@ def resolver_deuda_interactivo(deudas: list[dict]):
     # verificar si quedaron deudas sin resolver
     restantes = auditar_dias_pendientes()
     if restantes:
-        print()
+        imprimir()
         _warn(f"quedan {len(restantes)} día(s) con deuda — "
               f"se pedirá resolver en la próxima sesión")
     else:
-        print()
+        imprimir()
         _ok("todos los días anteriores están cuadrados")
 
-    print()
-    input(f"  {C}[Enter]{RST} para continuar... ")
+    imprimir()
+    pedir(f"  {C}[Enter]{RST} para continuar... ")
     os.system("clear")
 
 

@@ -118,9 +118,11 @@ P_DATO       = 11   # valores numéricos que deben leerse rápido
 # CÓMO FUNCIONA EL NEÓN
 #   El neón no es un color: es un contraste. Un cian brillante sobre gris
 #   claro se ve lavado; el mismo cian sobre gris muy oscuro se ve encendido.
-#   Por eso la estructura (CHROME) se hunde a 238 y el texto neutro baja a
-#   250: son el fondo contra el que los acentos prenden. Subirle el brillo a
-#   los acentos sin bajarle a lo demás solo hace que todo grite igual.
+#   Por eso el texto neutro baja a 250: es el fondo contra el que los acentos
+#   prenden. Pero hundir TAMBIÉN la estructura fue pasarse — con CHROME en
+#   238 el marco del POS quedaba casi invisible sobre fondo oscuro. El marco
+#   exterior ahora va en cian neón (ver marco()) y CHROME queda en 244, que
+#   es gris legible: separa jerarquía sin desaparecer.
 
 _PALETA_8 = {
     # Con 8 colores no existen tonos neón. El equivalente es el bit de
@@ -149,7 +151,7 @@ _PALETA_256 = {
     P_INV_OK:     (16,  48,   "bold"),   # negro sobre verde neón
     P_TITULO:     (201, None, "bold"),   # magenta neón — encabezados
     P_INV_AVISO:  (16,  214,  "bold"),   # negro sobre ámbar
-    P_CHROME:     (238, None, None),     # gris casi negro — hunde la estructura
+    P_CHROME:     (244, None, None),     # gris medio — legible sin robar atención
     P_DATO:       (87,  None, None),     # aqua eléctrico — cifras
 }
 
@@ -311,7 +313,10 @@ def marco(win, titulo="", attr=None, attr_titulo=None):
     if h < 2 or w < 4:
         return
     if attr is None:
-        attr = CHROME()
+        # el marco exterior va en cian neón, no en gris: es el chasis de la
+        # consola y tiene que leerse. Las divisiones internas sí van apagadas
+        # (ver divisor), que es lo que da la jerarquía entre marco y contenido.
+        attr = ACENTO()
     if attr_titulo is None:
         attr_titulo = TITULO()
 
@@ -534,7 +539,7 @@ _CODIGOS = {
     "aviso":  ("93", "38;5;214"),   # ámbar neón
     "alerta": ("91", "38;5;197"),   # rojo-rosa neón
     "titulo": ("95", "38;5;201"),   # magenta neón
-    "chrome": ("90", "38;5;238"),   # gris casi negro
+    "chrome": ("90", "38;5;244"),   # gris medio
 }
 
 
@@ -624,28 +629,97 @@ def dato_txt(label, valor, ancho_label=20, estilo="dato") -> str:
 
 # ── BANNER ───────────────────────────────────────────────────────────────────
 
-_BANNER_BLOQUE = r"""
- ██████╗  █████╗ ██╗   ██╗ ██████╗ ███████╗██╗   ██╗███████╗
- ██╔══██╗██╔══██╗╚██╗ ██╔╝██╔═══██╗██╔════╝╚██╗ ██╔╝██╔════╝
- ██████╔╝███████║ ╚████╔╝ ██║   ██║███████╗ ╚████╔╝ ███████╗
- ██╔══██╗██╔══██║  ╚██╔╝  ██║   ██║╚════██║  ╚██╔╝  ╚════██║
- ██████╔╝██║  ██║   ██║   ╚██████╔╝███████║   ██║   ███████║
- ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝
-""".strip("\n")
+# Wordmark de 2 renglones. La versión anterior eran 6 renglones de 59
+# columnas: ocupaba un cuarto de la pantalla de arranque y empujaba el menú
+# fuera del centro. Esta mide 25×2 y deja sitio para que el bloque completo
+# —banner, estado y menú— quepa centrado en la ventana.
+_BANNER_COMPACTO = [
+    "█▀▄ ▄▀█ █▄█ █▀█ █▀ █▄█ █▀",
+    "█▄▀ █▀█  █  █▄█ ▄█  █  ▄█",
+]
 
 
-def banner(subtitulo="TERMINAL DE OPERACIONES · PRODUCTOS EL BAYO") -> str:
+def banner(subtitulo="TERMINAL DE OPERACIONES · EL BAYO") -> list:
     """
-    Identidad de arranque. Requiere 61 columnas — por debajo de eso, o sin
-    UTF-8, cae a un encabezado de una línea en vez de imprimir un desastre.
+    Identidad de arranque, como lista de renglones ya coloreados.
+    Devuelve lista y no una cadena porque quien la imprime necesita saber
+    cuántos renglones ocupa para centrar el bloque verticalmente.
+    Sin UTF-8 cae a un wordmark de una línea.
     """
-    ancho_term = shutil.get_terminal_size((80, 24)).columns
-    if not UNICODE or ancho_term < 61:
-        return c("  bayoSys · " + subtitulo, "acento", negrita=True)
+    if not UNICODE:
+        return [c("bayoSys — " + subtitulo, "acento", negrita=True)]
 
-    lineas = [c(l, "acento") for l in _BANNER_BLOQUE.split("\n")]
-    pie    = c(f" {subtitulo.center(58)}", "chrome")
-    return "\n".join(lineas + [pie])
+    ancho = max(len(_BANNER_COMPACTO[0]), len(subtitulo))
+    # el centrado se hace antes de colorear: los escapes ANSI no ocupan
+    # columnas pero sí cuentan para len(), y center() se equivocaría
+    lineas = [c(l.center(ancho), "acento", negrita=True) for l in _BANNER_COMPACTO]
+    lineas.append(c(subtitulo.center(ancho), "chrome"))
+    return lineas
+
+
+# ── BLOQUE DE TEXTO CENTRADO ─────────────────────────────────────────────────
+# Los módulos sin curses imprimían desde la esquina superior izquierda. Estos
+# helpers los meten en un bloque de ancho fijo centrado en la terminal, para
+# que el sistema abra con el contenido en medio de la ventana y no pegado al
+# borde — el equivalente en texto plano del lienzo que usan las pantallas de
+# curses.
+
+ANCHO_TEXTO = 72        # ancho por defecto del bloque
+ANCHO_MENU  = 46        # menús: más angosto, para que el bloque quede cuadrado
+ANCHO_TABLA = 98        # tablas anchas (catálogo POS): la sangría se
+                        # recorta sola si la terminal no da para tanto
+
+
+def _tam_terminal():
+    return shutil.get_terminal_size((MIN_ANCHO, MIN_ALTO))
+
+
+def sangria(ancho=ANCHO_TEXTO) -> str:
+    """Margen izquierdo que centra un bloque de `ancho` columnas."""
+    return " " * max(0, (_tam_terminal().columns - ancho) // 2)
+
+
+def imprimir(texto="", ancho=ANCHO_TEXTO):
+    """
+    print() con el margen del bloque centrado. Un texto de varias líneas
+    lleva el mismo margen en todas, para no romper su alineación interna.
+    """
+    if texto == "":
+        print()
+        return
+    margen = sangria(ancho)
+    for linea in str(texto).split("\n"):
+        print(margen + linea)
+
+
+def pedir(prompt, ancho=ANCHO_TEXTO) -> str:
+    """
+    input() alineado con imprimir().
+
+    Si el prompt trae saltos de línea, el margen se aplica renglón por
+    renglón: pegarlo al principio de todo dejaría la sangría en la línea en
+    blanco y el prompt real pegado al borde izquierdo.
+    """
+    *previas, ultima = str(prompt).split("\n")
+    margen = sangria(ancho)
+    for linea in previas:
+        print(margen + linea if linea else "")
+    return input(margen + ultima)
+
+
+def imprimir_bloque(lineas, ancho=ANCHO_TEXTO, alto=None):
+    """
+    Imprime un bloque centrado en los dos ejes.
+
+    `alto` es cuántos renglones reservar para el centrado vertical: se pasa
+    mayor que len(lineas) cuando después del bloque viene un input(), para
+    que el prompt también quede dentro de la ventana y no la desborde.
+    """
+    filas  = _tam_terminal().lines
+    arriba = max(0, (filas - (alto or len(lineas))) // 2)
+    print("\n" * arriba, end="")
+    for linea in lineas:
+        imprimir(linea, ancho)
 
 
 # ── TAMAÑO EN TEXTO PLANO ────────────────────────────────────────────────────

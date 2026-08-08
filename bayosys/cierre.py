@@ -25,7 +25,7 @@ from typing import List
 from config import fecha_hoy, BASE_DIR
 from estilos import (
     titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
-    opcion_txt, dato_txt, c,
+    opcion_txt, dato_txt, c, imprimir, pedir,
 )
 from calcular import calcular_dia, calcular_ing_manteca_real, calcular_ing_chi_real
 from config import cargar_batches, cargar_config
@@ -130,11 +130,11 @@ def leer_manteca_del_pos(fecha: str) -> dict:
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 
 def _sep(char=None, ancho=54, estilo="chrome"):
-    print(sep_txt(char, ancho, estilo))
+    imprimir(sep_txt(char, ancho, estilo))
 
 def _titulo(texto):
-    print()
-    print(titulo_txt(texto, 54))
+    imprimir()
+    imprimir(titulo_txt(texto, 54))
 
 def _pedir_float(prompt, minimo=0.0, maximo=9999.0) -> float:
     # si el rango viene vacío no hay valor que aceptar: preguntar sería un
@@ -143,15 +143,15 @@ def _pedir_float(prompt, minimo=0.0, maximo=9999.0) -> float:
         return minimo
     while True:
         try:
-            val = float(input(f"  {prompt}: ").strip())
+            val = float(pedir(f"  {prompt}: ").strip())
             if minimo <= val <= maximo:
                 return val
-            print(alerta_txt(f"valor fuera de rango ({minimo}–{maximo})"))
+            imprimir(alerta_txt(f"valor fuera de rango ({minimo}–{maximo})"))
         except ValueError:
-            print(alerta_txt("ingresa un número válido"))
+            imprimir(alerta_txt("ingresa un número válido"))
 
 def _confirmar(prompt) -> bool:
-    return input(f"  {prompt} [s/n]: ").strip().lower() in ("s", "si", "sí", "y")
+    return pedir(f"  {prompt} [s/n]: ").strip().lower() in ("s", "si", "sí", "y")
 
 
 # ── FLUJO DE CIERRE ───────────────────────────────────────────────────────────
@@ -162,11 +162,11 @@ def registrar_cierre():
 
     batches = cargar_batches(fecha)
     if not batches:
-        print("\n" + alerta_txt(f"no hay batches registrados para {fecha}"))
+        imprimir("\n" + alerta_txt(f"no hay batches registrados para {fecha}"))
         return None
 
     # costo de gas del día
-    print(f"\n  GAS DEL DÍA")
+    imprimir(f"\n  GAS DEL DÍA")
     _sep()
     c_gas_dia = _pedir_float("costo gas hoy (ticket gasera $)", 0, 2000)
 
@@ -174,13 +174,13 @@ def registrar_cierre():
 
     _titulo(f"CIERRE DEL DÍA — {fecha}")
 
-    print(f"  producción del día:")
-    print(f"  chicharrón : {rd.kg_chi_dia:.2f} kg")
-    print(f"  manteca    : {rd.kg_mant_dia:.2f} kg  /  {rd.lt_mant_dia:.2f} lt")
-    print(f"  equivale a : {rd.cubetas_dia:.2f} cub  (referencia — el inventario real está abajo)")
+    imprimir(f"  producción del día:")
+    imprimir(f"  chicharrón : {rd.kg_chi_dia:.2f} kg")
+    imprimir(f"  manteca    : {rd.kg_mant_dia:.2f} kg  /  {rd.lt_mant_dia:.2f} lt")
+    imprimir(f"  equivale a : {rd.cubetas_dia:.2f} cub  (referencia — el inventario real está abajo)")
 
     # ── chicharrón ───────────────────────────────────────────────────
-    print(f"\n  CHICHARRÓN  ({rd.kg_chi_dia:.2f} kg producidos)")
+    imprimir(f"\n  CHICHARRÓN  ({rd.kg_chi_dia:.2f} kg producidos)")
     _sep()
     chi_pub_kg = _pedir_float(
         f"kg vendidos a público × ${cfg.precio_chi_pub:.0f}",
@@ -193,7 +193,7 @@ def registrar_cierre():
     chi_total = chi_pub_kg + chi_may_kg
     if chi_total < rd.kg_chi_dia:
         diff = rd.kg_chi_dia - chi_total
-        print(f"  nota: {diff:.2f} kg sin asignar — se agregan a mayoreo")
+        imprimir(f"  nota: {diff:.2f} kg sin asignar — se agregan a mayoreo")
         chi_may_kg += diff
 
     # ── manteca — se lee del POS, no se captura ──────────────────────
@@ -207,28 +207,28 @@ def registrar_cierre():
     env_05lt_vend = sum(v.env_05lt for v in ventas_litreada)
     cub_vendidas  = sum(v.cantidad for v in ventas_cubeta)
 
-    print(f"\n  MANTECA  (registrada en el POS — no se captura aquí)")
+    imprimir(f"\n  MANTECA  (registrada en el POS — no se captura aquí)")
     _sep()
-    print(f"  litreada vendida : {env_1lt_vend} × 1lt   {env_05lt_vend} × 500ml"
+    imprimir(f"  litreada vendida : {env_1lt_vend} × 1lt   {env_05lt_vend} × 500ml"
           f"   ({len(ventas_litreada)} tickets)")
-    print(f"  cubetas vendidas : {cub_vendidas:.1f}   ({len(ventas_cubeta)} ventas)")
-    print(f"  ─────────────────────────────")
-    print(f"  en bodega        : {stock_cubetas_final:.0f} cubetas selladas")
-    print(f"  envasado         : {mant['env_1lt_stock']:.0f} × 1lt   "
+    imprimir(f"  cubetas vendidas : {cub_vendidas:.1f}   ({len(ventas_cubeta)} ventas)")
+    imprimir(f"  ─────────────────────────────")
+    imprimir(f"  en bodega        : {stock_cubetas_final:.0f} cubetas selladas")
+    imprimir(f"  envasado         : {mant['env_1lt_stock']:.0f} × 1lt   "
           f"{mant['env_05lt_stock']:.0f} × 500ml")
-    print(f"  a granel         : {mant['pool_lt']:.2f} lt  "
+    imprimir(f"  a granel         : {mant['pool_lt']:.2f} lt  "
           f"(faltan {max(0.0, LT_POR_CUBETA - mant['pool_lt']):.2f} lt para cubeta)")
 
     # cuadre contra lo que salió de producción hoy
     lt_en_pos = (stock_cubetas_final * LT_POR_CUBETA + stock_litreada_final +
                  cub_vendidas * LT_POR_CUBETA +
                  sum(v.lt_total for v in ventas_litreada))
-    print(f"\n  producción del día : {rd.lt_mant_dia:.2f} lt")
-    print(f"  litros en el POS   : {lt_en_pos:.2f} lt  (bodega + envasado + granel + vendido)")
-    print(f"  nota: la diferencia es el arrastre de días anteriores")
+    imprimir(f"\n  producción del día : {rd.lt_mant_dia:.2f} lt")
+    imprimir(f"  litros en el POS   : {lt_en_pos:.2f} lt  (bodega + envasado + granel + vendido)")
+    imprimir(f"  nota: la diferencia es el arrastre de días anteriores")
 
     # ── observaciones ─────────────────────────────────────────────────
-    obs = input("\n  observaciones (Enter para omitir): ").strip()
+    obs = pedir("\n  observaciones (Enter para omitir): ").strip()
 
     # ── construir cierre ──────────────────────────────────────────────
     cierre = CierreDia(
@@ -251,28 +251,28 @@ def registrar_cierre():
     utilidad  = ing_total - rd.c_total_dia
 
     _titulo("RESUMEN DEL CIERRE")
-    print(f"  chi público : {chi_pub_kg:.2f} kg × ${cfg.precio_chi_pub:.0f} = ${chi_pub_kg * cfg.precio_chi_pub:,.2f}")
-    print(f"  chi mayoreo : {chi_may_kg:.2f} kg × ${cfg.precio_chi_may:.0f} = ${chi_may_kg * cfg.precio_chi_may:,.2f}")
+    imprimir(f"  chi público : {chi_pub_kg:.2f} kg × ${cfg.precio_chi_pub:.0f} = ${chi_pub_kg * cfg.precio_chi_pub:,.2f}")
+    imprimir(f"  chi mayoreo : {chi_may_kg:.2f} kg × ${cfg.precio_chi_may:.0f} = ${chi_may_kg * cfg.precio_chi_may:,.2f}")
     # los precios salen de cada venta, no de Config — pueden variar en el día
-    print(f"  litreada 1lt: {mant_real['env_1lt_total']} env = ${mant_real['ing_litreada_1lt']:,.2f}")
-    print(f"  litreada ½lt: {mant_real['env_05lt_total']} env = ${mant_real['ing_litreada_05lt']:,.2f}")
+    imprimir(f"  litreada 1lt: {mant_real['env_1lt_total']} env = ${mant_real['ing_litreada_1lt']:,.2f}")
+    imprimir(f"  litreada ½lt: {mant_real['env_05lt_total']} env = ${mant_real['ing_litreada_05lt']:,.2f}")
     for v in ventas_cubeta:
-        print(f"  cubeta      : {v.cantidad:.1f} × ${v.precio:.0f} = ${v.cantidad * v.precio:,.2f}")
+        imprimir(f"  cubeta      : {v.cantidad:.1f} × ${v.precio:.0f} = ${v.cantidad * v.precio:,.2f}")
     _sep("─", 44)
-    print(f"  INGRESO REAL:   ${ing_total:,.2f}")
-    print(f"  COSTO DÍA:      ${rd.c_total_dia:,.2f}  (incl. gas ${c_gas_dia:.0f})")
+    imprimir(f"  INGRESO REAL:   ${ing_total:,.2f}")
+    imprimir(f"  COSTO DÍA:      ${rd.c_total_dia:,.2f}  (incl. gas ${c_gas_dia:.0f})")
     signo = "✓" if utilidad > 0 else "!!"
-    print(f"  UTILIDAD REAL:  ${utilidad:,.2f}  {signo}")
-    print(f"  stock litreada: {stock_litreada_final:.2f} lt")
-    print(f"  stock cubetas:  {stock_cubetas_final:.2f} cub")
+    imprimir(f"  UTILIDAD REAL:  ${utilidad:,.2f}  {signo}")
+    imprimir(f"  stock litreada: {stock_litreada_final:.2f} lt")
+    imprimir(f"  stock cubetas:  {stock_cubetas_final:.2f} cub")
 
-    print()
+    imprimir()
     if _confirmar("  ¿guardar cierre?"):
         guardar_cierre(cierre)
-        print("\n" + ok_txt(f"cierre guardado") + "\n")
+        imprimir("\n" + ok_txt(f"cierre guardado") + "\n")
         return cierre
     else:
-        print("\n  ✗ cierre descartado\n")
+        imprimir("\n  ✗ cierre descartado\n")
         return None
 
 
@@ -288,23 +288,23 @@ def menu_cierre():
         if cierre:
             cfg       = cargar_config()
             mant_real = calcular_ing_manteca_real(cierre, cfg)
-            print(f"  cierre registrado")
-            print(f"  chi público:  {cierre.chi_pub_kg:.2f} kg")
-            print(f"  chi mayoreo:  {cierre.chi_may_kg:.2f} kg")
-            print(f"  litreada:     {mant_real['env_1lt_total']}×1lt  {mant_real['env_05lt_total']}×½lt  ({mant_real['lt_litreada_total']:.2f} lt)  = ${mant_real['ing_litreada']:,.0f}")
-            print(f"  cubetas:      {mant_real['cubetas_vendidas']:.1f} cub  = ${mant_real['ing_cubetas']:,.0f}")
-            print(f"  stock lit:    {cierre.stock_litreada_lt:.2f} lt")
-            print(f"  stock cub:    {cierre.stock_cubetas:.2f} cub")
-            print()
-            print(opcion_txt("1", "rehacer cierre"))
-            print(opcion_txt("2", "volver"))
+            imprimir(f"  cierre registrado")
+            imprimir(f"  chi público:  {cierre.chi_pub_kg:.2f} kg")
+            imprimir(f"  chi mayoreo:  {cierre.chi_may_kg:.2f} kg")
+            imprimir(f"  litreada:     {mant_real['env_1lt_total']}×1lt  {mant_real['env_05lt_total']}×½lt  ({mant_real['lt_litreada_total']:.2f} lt)  = ${mant_real['ing_litreada']:,.0f}")
+            imprimir(f"  cubetas:      {mant_real['cubetas_vendidas']:.1f} cub  = ${mant_real['ing_cubetas']:,.0f}")
+            imprimir(f"  stock lit:    {cierre.stock_litreada_lt:.2f} lt")
+            imprimir(f"  stock cub:    {cierre.stock_cubetas:.2f} cub")
+            imprimir()
+            imprimir(opcion_txt("1", "rehacer cierre"))
+            imprimir(opcion_txt("2", "volver"))
         else:
-            print("  sin cierre registrado hoy")
-            print()
-            print(opcion_txt("1", "registrar cierre"))
-            print(opcion_txt("2", "volver"))
+            imprimir("  sin cierre registrado hoy")
+            imprimir()
+            imprimir(opcion_txt("1", "registrar cierre"))
+            imprimir(opcion_txt("2", "volver"))
 
-        op = input("\n  opción: ").strip()
+        op = pedir("\n  opción: ").strip()
         if op == "1":
             registrar_cierre()
         elif op == "2":
