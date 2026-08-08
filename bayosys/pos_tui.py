@@ -333,8 +333,8 @@ def draw_panel_ticket(win, sesion: SesionPOS):
     marco(win, "ticket actual")
 
     if sesion.ticket is None or sesion.ticket.vacio():
-        sadd(win, 2, 3, "sin artículos en el ticket", CHROME())
-        sadd(win, h - 2, 3, "elige un producto del panel izquierdo", CHROME())
+        sadd(win, 2, 3, "sin carga registrada", CHROME())
+        sadd(win, h - 2, 3, "en espera — selecciona un producto", CHROME())
         return
 
     y = 2
@@ -514,7 +514,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 def pantalla_inventario(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    encabezado(stdscr, "inventario")
+    encabezado(stdscr, "inventario", "escaneo de bodega")
 
     inv = get_estado_inventario()
     sadd(stdscr, 2, 2,
@@ -589,7 +589,7 @@ def pantalla_inventario(stdscr):
 def pantalla_historial(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    encabezado(stdscr, "historial de tickets")
+    encabezado(stdscr, "historial de tickets", "registro del turno")
 
     tickets = get_historial_tickets()
     sadd(stdscr, 2, 2,
@@ -630,7 +630,7 @@ def pantalla_status_pedidos(stdscr):
     pedidos = get_pedidos_mayoreo_pendientes()
 
     if not pedidos:
-        sadd(stdscr, 3, 2, "  sin pedidos pendientes", TEXTO())
+        sadd(stdscr, 3, 2, "  cola despejada — sin pedidos en espera", CHROME())
     else:
         sadd(stdscr, 2, 2,
              f"{'#':>4}  {'prioridad':<9}  {'cliente':<16}  {'kg':>6}  {'precio':>8}  {'total':>9}  entrega",
@@ -686,7 +686,7 @@ def flujo_capturar_pedido_mayoreo(stdscr) -> str:
 
     if not clientes:
         sadd(stdscr, h // 2, w // 2 - 20,
-             "  sin clientes — dalos de alta primero  ", ALERTA())
+             "  sin clientes en registro — da de alta primero  ", ALERTA())
         stdscr.refresh()
         stdscr.getch()
         return ""
@@ -784,7 +784,7 @@ def _texto_ticker_mayoreo() -> str:
     ordenados por prioridad (ya vienen así desde get_pedidos_mayoreo_pendientes)."""
     pedidos = get_pedidos_mayoreo_pendientes()
     if not pedidos:
-        return "  sin pedidos de mayoreo pendientes  »  "
+        return "  cola de mayoreo despejada  »  "
 
     marcador = {"muy_alta": "●●●", "alta": "●●", "media": "●", "baja": "·"}
     partes = []
@@ -912,7 +912,7 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
     stdscr.timeout(150) # getch() regresa -1 si no hay tecla en 150ms - permite animar el ticker
 
     sesion = iniciar_pos(batch_id=batch_id, operador=operador)
-    msg    = f"BayoPOS iniciado — batch#{batch_id}"
+    msg    = f"terminal en línea · batch#{batch_id}"
     ticker_offset = 0
     while True:
         # si el usuario redimensiona la terminal, el lienzo se recentra
@@ -1074,7 +1074,7 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
         # ── SALIR ─────────────────────────────────────────────────────
         elif key in (ord("q"), ord("Q")):
             if sesion.ticket and not sesion.ticket.vacio():
-                msg = "! cierra el ticket antes de salir"
+                msg = "! ticket abierto — ciérralo antes de desacoplar"
             else:
                 break
 

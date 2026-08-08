@@ -110,36 +110,51 @@ P_INV_AVISO  = 9    # franja de advertencia
 P_CHROME     = 10   # estructura apagada: bordes secundarios, separadores
 P_DATO       = 11   # valores numéricos que deben leerse rápido
 
-# (frente, fondo) — None en el fondo = fondo por defecto de la terminal
+# (frente, fondo, brillo) — None en el fondo = fondo por defecto de la terminal.
+# El brillo se guarda como texto ("bold"/"dim"/None) y no como curses.A_BOLD
+# porque estas tablas se definen al importar, y curses puede no estar
+# disponible (los módulos de texto plano también importan este archivo).
+#
+# CÓMO FUNCIONA EL NEÓN
+#   El neón no es un color: es un contraste. Un cian brillante sobre gris
+#   claro se ve lavado; el mismo cian sobre gris muy oscuro se ve encendido.
+#   Por eso la estructura (CHROME) se hunde a 238 y el texto neutro baja a
+#   250: son el fondo contra el que los acentos prenden. Subirle el brillo a
+#   los acentos sin bajarle a lo demás solo hace que todo grite igual.
+
 _PALETA_8 = {
-    P_TEXTO:      ("WHITE",   None),
-    P_ACENTO:     ("CYAN",    None),
-    P_OK:         ("GREEN",   None),
-    P_AVISO:      ("YELLOW",  None),
-    P_ALERTA:     ("RED",     None),
-    P_INV_ACENTO: ("BLACK",   "CYAN"),
-    P_INV_OK:     ("BLACK",   "GREEN"),
-    P_TITULO:     ("MAGENTA", None),
-    P_INV_AVISO:  ("BLACK",   "YELLOW"),
-    P_CHROME:     ("WHITE",   None),   # se apaga con A_DIM, ver atributo CHROME()
-    P_DATO:       ("CYAN",    None),
+    # Con 8 colores no existen tonos neón. El equivalente es el bit de
+    # intensidad: en la práctica todos los emuladores pintan bold+color como
+    # la variante brillante (cian 36 → cian brillante 96).
+    P_TEXTO:      ("WHITE",   None,     None),
+    P_ACENTO:     ("CYAN",    None,     "bold"),
+    P_OK:         ("GREEN",   None,     "bold"),
+    P_AVISO:      ("YELLOW",  None,     "bold"),
+    P_ALERTA:     ("RED",     None,     "bold"),
+    P_INV_ACENTO: ("BLACK",   "CYAN",   "bold"),
+    P_INV_OK:     ("BLACK",   "GREEN",  "bold"),
+    P_TITULO:     ("MAGENTA", None,     "bold"),
+    P_INV_AVISO:  ("BLACK",   "YELLOW", "bold"),
+    P_CHROME:     ("WHITE",   None,     "dim"),   # no hay gris: se apaga el blanco
+    P_DATO:       ("CYAN",    None,     "bold"),
 }
 
-# Tonos de 256 colores. Cian holográfico + ámbar sobre grises fríos —
-# la referencia es una consola de nave, no un semáforo de tres luces.
 _PALETA_256 = {
-    P_TEXTO:      (252, None),   # gris claro, menos agresivo que blanco puro
-    P_ACENTO:     (51,  None),   # cian brillante
-    P_OK:         (48,  None),   # verde
-    P_AVISO:      (214, None),   # ámbar
-    P_ALERTA:     (196, None),   # rojo
-    P_INV_ACENTO: (16,  45),     # negro sobre cian
-    P_INV_OK:     (16,  48),     # negro sobre verde
-    P_TITULO:     (81,  None),   # cian claro
-    P_INV_AVISO:  (16,  214),    # negro sobre ámbar
-    P_CHROME:     (240, None),   # gris oscuro — estructura sin protagonismo
-    P_DATO:       (45,  None),   # cian medio
+    P_TEXTO:      (250, None, None),     # gris neutro — el lienzo, no el acento
+    P_ACENTO:     (51,  None, "bold"),   # cian eléctrico — teclas y estructura viva
+    P_OK:         (48,  None, "bold"),   # verde neón
+    P_AVISO:      (214, None, "bold"),   # ámbar neón
+    P_ALERTA:     (197, None, "bold"),   # rojo-rosa neón, más caliente que el 196
+    P_INV_ACENTO: (16,  51,   "bold"),   # negro sobre cian eléctrico
+    P_INV_OK:     (16,  48,   "bold"),   # negro sobre verde neón
+    P_TITULO:     (201, None, "bold"),   # magenta neón — encabezados
+    P_INV_AVISO:  (16,  214,  "bold"),   # negro sobre ámbar
+    P_CHROME:     (238, None, None),     # gris casi negro — hunde la estructura
+    P_DATO:       (87,  None, None),     # aqua eléctrico — cifras
 }
+
+# idx → atributo extra ya resuelto a constante de curses. Lo llena init_colors().
+_BRILLO = {}
 
 
 def init_colors():
@@ -158,8 +173,9 @@ def init_colors():
 
     N_COLORES = getattr(curses, "COLORS", 8) or 8
     paleta = _PALETA_256 if N_COLORES >= 256 else _PALETA_8
+    extras = {"bold": curses.A_BOLD, "dim": curses.A_DIM, None: 0}
 
-    for idx, (fg, bg) in paleta.items():
+    for idx, (fg, bg, brillo) in paleta.items():
         if isinstance(fg, str):
             fg = getattr(curses, f"COLOR_{fg}")
         if isinstance(bg, str):
@@ -169,30 +185,27 @@ def init_colors():
         except curses.error:
             # terminal sin ese índice de color — se queda con el par por defecto
             pass
+        _BRILLO[idx] = extras[brillo]
 
 
 # ── ATRIBUTOS ────────────────────────────────────────────────────────────────
 # Funciones, no constantes: el par de color no existe hasta que corre
 # init_colors(), así que resolverlo en tiempo de dibujo es lo correcto.
 
-def TEXTO():   return curses.color_pair(P_TEXTO)
-def ACENTO():  return curses.color_pair(P_ACENTO)
-def OK():      return curses.color_pair(P_OK)
-def AVISO():   return curses.color_pair(P_AVISO)
-def ALERTA():  return curses.color_pair(P_ALERTA)
-def TITULO():  return curses.color_pair(P_TITULO)  | curses.A_BOLD
-def DATO():    return curses.color_pair(P_DATO)
-def TAB():     return curses.color_pair(P_INV_ACENTO) | curses.A_BOLD
-def BOTON():   return curses.color_pair(P_INV_OK)     | curses.A_BOLD
-def WARN():    return curses.color_pair(P_INV_AVISO)  | curses.A_BOLD
+def _attr(idx):
+    return curses.color_pair(idx) | _BRILLO.get(idx, 0)
 
-def CHROME():
-    """
-    Estructura secundaria. Con 256 colores es un gris real; con 8 colores
-    no hay gris disponible, así que se simula apagando el blanco con A_DIM.
-    """
-    attr = curses.color_pair(P_CHROME)
-    return attr if N_COLORES >= 256 else attr | curses.A_DIM
+def TEXTO():   return _attr(P_TEXTO)
+def ACENTO():  return _attr(P_ACENTO)
+def OK():      return _attr(P_OK)
+def AVISO():   return _attr(P_AVISO)
+def ALERTA():  return _attr(P_ALERTA)
+def TITULO():  return _attr(P_TITULO)
+def DATO():    return _attr(P_DATO)
+def TAB():     return _attr(P_INV_ACENTO)
+def BOTON():   return _attr(P_INV_OK)
+def WARN():    return _attr(P_INV_AVISO)
+def CHROME():  return _attr(P_CHROME)
 
 
 def color_margen(pct: float):
@@ -300,7 +313,7 @@ def marco(win, titulo="", attr=None, attr_titulo=None):
     if attr is None:
         attr = CHROME()
     if attr_titulo is None:
-        attr_titulo = ACENTO() | curses.A_BOLD
+        attr_titulo = TITULO()
 
     ancho_interno = w - 2
 
@@ -329,7 +342,7 @@ def caja(win, y, x, alto, ancho, titulo="", attr=None, attr_titulo=None):
     if attr is None:
         attr = ACENTO()
     if attr_titulo is None:
-        attr_titulo = ACENTO() | curses.A_BOLD
+        attr_titulo = TITULO()
 
     w = win.getmaxyx()[1]
     interno = ancho - 2
@@ -509,16 +522,19 @@ _ANSI256 = _ANSI and _ansi_256()
 
 _RESET = "\033[0m"
 
-# (código 8 colores, código 256 colores)
+# (código 8 colores, código 256 colores) — mismos tonos que la paleta de
+# curses. En 8 colores se usan los códigos brillantes (90-97) en vez de los
+# normales (30-37): es el equivalente disponible del neón, y es lo que este
+# proyecto ya venía usando a mano en guardian.py.
 _CODIGOS = {
-    "texto":  ("37", "38;5;252"),
-    "acento": ("36", "38;5;51"),
-    "dato":   ("36", "38;5;45"),
-    "ok":     ("32", "38;5;48"),
-    "aviso":  ("33", "38;5;214"),
-    "alerta": ("31", "38;5;196"),
-    "titulo": ("35", "38;5;81"),
-    "chrome": ("2",  "38;5;240"),   # sin 256 colores se apaga con A_DIM (código 2)
+    "texto":  ("37", "38;5;250"),
+    "acento": ("96", "38;5;51"),    # cian eléctrico
+    "dato":   ("96", "38;5;87"),    # aqua eléctrico
+    "ok":     ("92", "38;5;48"),    # verde neón
+    "aviso":  ("93", "38;5;214"),   # ámbar neón
+    "alerta": ("91", "38;5;197"),   # rojo-rosa neón
+    "titulo": ("95", "38;5;201"),   # magenta neón
+    "chrome": ("90", "38;5;238"),   # gris casi negro
 }
 
 
@@ -618,7 +634,7 @@ _BANNER_BLOQUE = r"""
 """.strip("\n")
 
 
-def banner(subtitulo="PRODUCTOS EL BAYO") -> str:
+def banner(subtitulo="TERMINAL DE OPERACIONES · PRODUCTOS EL BAYO") -> str:
     """
     Identidad de arranque. Requiere 61 columnas — por debajo de eso, o sin
     UTF-8, cae a un encabezado de una línea en vez de imprimir un desastre.

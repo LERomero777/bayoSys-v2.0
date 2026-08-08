@@ -119,7 +119,7 @@ def _estado_hoy() -> str:
     cierre  = cargar_cierre(fecha)
 
     if not batches:
-        return "sin batches hoy"
+        return "sin producción registrada hoy"
 
     cfg = cargar_config()
     rd  = calcular_dia(batches, cfg)
@@ -133,9 +133,9 @@ def _estado_hoy() -> str:
         utilidad  = ing_total - rd.c_total_dia
         estado += (f"  util:${utilidad:,.0f}"
                    f"  lit:{cierre.stock_litreada_lt:.1f}lt"
-                   f"  cub:{cierre.stock_cubetas:.1f}  [cerrado]")
+                   f"  cub:{cierre.stock_cubetas:.1f}  [día sellado]")
     else:
-        estado += f"  costo:${rd.c_total_dia:,.0f}  [sin cierre]"
+        estado += f"  costo:${rd.c_total_dia:,.0f}  [día abierto]"
 
     return estado
 
@@ -680,7 +680,7 @@ def main():
             factory_reset()
 
         elif op == "0":
-            print("\n  hasta luego\n")
+            print(f"\n  {c('desacoplando — terminal fuera de línea', 'acento')}\n")
             break
 
         else:

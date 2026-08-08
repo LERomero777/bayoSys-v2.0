@@ -175,7 +175,7 @@ def factory_reset():
         print(f"  !! el respaldo sigue disponible en: {ruta_backup}\n")
         return
 
-    print("\n  ☢ sistema reiniciado a estado de fábrica ☢")
+    print("\n  ☢ purga completa — sistema en estado de fábrica ☢")
     print(f"  respaldo previo disponible en: {ruta_backup}")
     print()
 
