@@ -18,6 +18,7 @@ from datetime import date, timedelta, datetime
 from config import cargar_batches, fechas_con_registro, fecha_hoy, cargar_config
 from cierre import cargar_cierre
 from pos_db import tiene_corte_guardado, calcular_corte, guardar_corte
+from reportes import exportar_dia_seguro
 from estilos import (
     esc, esc_negrita, reset, sep_txt, CAJA, imprimir, pedir,
 )
@@ -133,6 +134,8 @@ def _resolver_corte_caja(fecha: str, batch_ids: list[int]):
     Muestra y guarda el corte de caja para cada batch pendiente del día.
     Flujo no-curses — usa pedir() simple.
     """
+    alguno_guardado = False
+
     for batch_id in batch_ids:
         corte = calcular_corte(batch_id=batch_id)
 
@@ -140,6 +143,7 @@ def _resolver_corte_caja(fecha: str, batch_ids: list[int]):
             _info(f"batch #{batch_id} — sin ventas, corte automático")
             guardar_corte(batch_id, corte, nota="auto — sin ventas")
             _ok(f"batch #{batch_id} cortado (vacío)")
+            alguno_guardado = True
             continue
 
         imprimir()
@@ -168,6 +172,22 @@ def _resolver_corte_caja(fecha: str, batch_ids: list[int]):
             corte_id = guardar_corte(batch_id, corte,
                                       nota=f"guardian — cierre tardío {fecha}")
             _ok(f"batch #{batch_id} — corte #{corte_id} guardado")
+            alguno_guardado = True
+
+    # Una sola exportación al final, no una por batch: todos los cortes de
+    # este bucle son del MISMO día y comparten archivo, así que exportar
+    # dentro del ciclo reescribiría el mismo .xlsx varias veces.
+    #
+    # Va con 'fecha' explícita, no con el default de hoy: el guardian
+    # resuelve cortes atrasados, y el día que hay que exportar es el del
+    # corte, no aquel en que el operador se puso al corriente.
+    if alguno_guardado:
+        ruta = exportar_dia_seguro(fecha)
+        if ruta:
+            _ok(f"respaldo Excel — {ruta}")
+        else:
+            _warn(f"no se pudo generar el Excel de {fecha} — "
+                  f"los cortes SÍ quedaron guardados")
 
 
 def _resolver_cierre_produccion(fecha: str):
