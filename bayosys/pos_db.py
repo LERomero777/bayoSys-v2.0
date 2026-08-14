@@ -19,8 +19,14 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Optional
 
+from models import LT_POR_CUBETA, LT_POR_ENV_1LT, LT_POR_ENV_05LT
+
 BASE_DIR = os.path.join(os.path.expanduser("~"), "bayosys", "data")
 POS_DB   = os.path.join(BASE_DIR, "pos.db")
+
+# tolerancia de punto flotante al comparar litros — 19.0 lt exactos deben
+# emitir 1 cubeta, no 0 por un error de representación en el decimoquinto decimal
+EPS_LT = 1e-6
 
 
 # ── CONEXIÓN ─────────────────────────────────────────────────────────────────
@@ -176,6 +182,25 @@ CREATE TABLE IF NOT EXISTS pedidos_mayoreo (
     entregado           INTEGER NOT NULL DEFAULT 0,
     nota                TEXT,
     FOREIGN KEY (cliente_clave) REFERENCES clientes_mayoreo(clave)
+);
+
+-- Pool de manteca a granel — los litros sueltos de la cubeta fraccionada.
+-- Es el ÚNICO lugar donde viven los litros que todavía no son cubeta sellada
+-- (CUB) ni envase litreado (M1LT / M05). Un litro está en exactamente uno de
+-- los tres lados, nunca en dos — esa es la regla que evita el doble conteo.
+--
+-- Ledger append-only: el saldo vigente es lt_saldo del último renglón.
+-- Nunca se hace UPDATE, solo INSERT, para que el histórico sea auditable.
+CREATE TABLE IF NOT EXISTS manteca_pool (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    fecha            TEXT NOT NULL,
+    hora             TEXT NOT NULL,
+    tipo             TEXT NOT NULL,   -- 'produccion'|'apertura'|'litreado'|'ajuste'
+    lt_delta         REAL NOT NULL,   -- litros que entran (+) o salen (-) del pool
+    cubetas_emitidas REAL NOT NULL DEFAULT 0,   -- cubetas selladas que generó el movimiento
+    lt_saldo         REAL NOT NULL,   -- saldo del pool DESPUÉS del movimiento
+    referencia       TEXT,            -- batch#AAAAMMDD-N, apertura_cubeta_..., 'manual'
+    nota             TEXT
 );
 """
 
@@ -656,6 +681,24 @@ def tiene_corte_guardado(batch_id: str) -> bool:
 
 # ── RESUMEN VENTAS DÍA ────────────────────────────────────────────────────────
 
+def get_items_vendidos_dia(sku: str, fecha: str = None) -> list:
+    """
+    Líneas de venta de un SKU en el día, ticket por ticket.
+    A diferencia de resumen_ventas_dia() no agrega — conserva el precio real
+    de cada transacción, que en cubetas se negocia venta por venta.
+    """
+    if fecha is None:
+        fecha = date.today().isoformat()
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT ti.ticket_id, ti.cantidad, ti.precio_unit, ti.subtotal, t.hora
+            FROM ticket_items ti
+            JOIN tickets t ON ti.ticket_id = t.id
+            WHERE t.fecha = ? AND t.anulado = 0 AND ti.sku = ?
+            ORDER BY ti.ticket_id
+        """, (fecha, sku)).fetchall()
+
+
 def resumen_ventas_dia(fecha: str = None) -> dict:
     """Agrega ventas del día por SKU. Usado por cierre.py y analisis.py."""
     if fecha is None:
@@ -673,46 +716,218 @@ def resumen_ventas_dia(fecha: str = None) -> dict:
     return {row["sku"]: dict(row) for row in items}
 
 
-# ── APERTURA DE CUBETA ────────────────────────────────────────────────────────
+# ── POOL DE MANTECA A GRANEL ──────────────────────────────────────────────────
+# Modelo físico: la manteca vive en tres lados y en uno solo a la vez.
+#
+#   pool (manteca_pool)  →  litros sueltos = la cubeta fraccionada abierta
+#   CUB  (inventario)    →  cubetas selladas de 19 lt
+#   M1LT / M05           →  envases ya litreados, listos para vender
+#
+# Un batch nunca cuadra a cubeta exacta (26 kg de grasa = 1 cubeta, pero los
+# batches son de 25, 30, 35, 40 kg). Entonces la producción entra al pool y el
+# pool emite SOLO cubetas completas al inventario; la fracción queda flotando
+# para el día siguiente. La emisión ocurre únicamente al cargar producción —
+# abrir una cubeta nunca vuelve a sellar otra.
 
-def abrir_cubeta(env_1lt: int, env_05lt: int, nota: str = ""):
-    """
-    Registra la apertura de una cubeta para litrear.
-    Descuenta 1 CUB → carga env_1lt a M1LT y env_05lt a M05.
-    """
+def _pool_saldo(conn: sqlite3.Connection) -> float:
+    """Saldo vigente del pool = lt_saldo del último renglón del ledger."""
+    row = conn.execute(
+        "SELECT lt_saldo FROM manteca_pool ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return float(row["lt_saldo"]) if row else 0.0
+
+
+def _pool_asentar(conn: sqlite3.Connection, tipo: str, lt_delta: float,
+                  saldo_nuevo: float, referencia: str, nota: str = "",
+                  cubetas_emitidas: float = 0.0):
+    """Escribe un renglón del ledger. Append-only, nunca UPDATE."""
     ahora = datetime.now()
-    fecha = ahora.strftime("%Y-%m-%d")
-    hora  = ahora.strftime("%H:%M")
-    ref   = f"apertura_cubeta_{fecha}_{hora}"
+    conn.execute("""
+        INSERT INTO manteca_pool
+        (fecha, hora, tipo, lt_delta, cubetas_emitidas, lt_saldo, referencia, nota)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (ahora.strftime("%Y-%m-%d"), ahora.strftime("%H:%M"), tipo,
+          round(lt_delta, 4), cubetas_emitidas, round(saldo_nuevo, 4),
+          referencia, nota))
+
+
+def _mov_inv(conn: sqlite3.Connection, sku: str, tipo: str, cantidad: float,
+             referencia: str, nota: str = ""):
+    """Mueve stock de un SKU y deja el rastro en movimientos_inv."""
+    ahora = datetime.now()
+    conn.execute(
+        "UPDATE inventario SET stock = stock + ? WHERE sku = ?", (cantidad, sku)
+    )
+    conn.execute("""
+        INSERT INTO movimientos_inv (fecha, hora, sku, tipo, cantidad, referencia, nota)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (ahora.strftime("%Y-%m-%d"), ahora.strftime("%H:%M"),
+          sku, tipo, cantidad, referencia, nota))
+
+
+def get_pool_manteca() -> float:
+    """Litros de manteca a granel pendientes de envasar o completar cubeta."""
+    with conectar() as conn:
+        return _pool_saldo(conn)
+
+
+def get_pool_historial(limit: int = 30) -> list:
+    """Ledger del pool, más reciente primero."""
+    with conectar() as conn:
+        return conn.execute(
+            "SELECT * FROM manteca_pool ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+def cargar_produccion_batch(batch_id: str, kg_chi: float,
+                            lt_manteca: float) -> dict:
+    """
+    Carga al POS la producción de un batch recién registrado, en UNA transacción:
+
+      - kg_chi        → stock CHI
+      - lt_manteca    → pool, que emite al stock CUB las cubetas completas
+                        que alcancen y deja la fracción flotando
+
+    Idempotente: si el batch ya se cargó, no hace nada y lo reporta. Evita que
+    un reintento tras un error a medias duplique el inventario del día.
+    """
+    referencia = f"batch#{batch_id}"
 
     with conectar() as conn:
-        conn.execute("UPDATE inventario SET stock = stock - 1 WHERE sku = 'CUB'")
-        conn.execute("""
-            INSERT INTO movimientos_inv (fecha, hora, sku, tipo, cantidad, referencia, nota)
-            VALUES (?, ?, 'CUB', 'apertura_cubeta', -1, ?, ?)
-        """, (fecha, hora, ref, nota))
-
-        if env_1lt > 0:
-            conn.execute(
-                "UPDATE inventario SET stock = stock + ? WHERE sku = 'M1LT'",
-                (env_1lt,)
+        ya = conn.execute("""
+            SELECT 1 FROM movimientos_inv
+            WHERE referencia = ? AND tipo = 'produccion' LIMIT 1
+        """, (referencia,)).fetchone()
+        if ya:
+            return dict(
+                ya_cargado       = True,
+                kg_chi           = 0.0,
+                lt_ingresados    = 0.0,
+                pool_antes       = _pool_saldo(conn),
+                cubetas_emitidas = 0.0,
+                pool_despues     = _pool_saldo(conn),
             )
-            conn.execute("""
-                INSERT INTO movimientos_inv (fecha, hora, sku, tipo, cantidad, referencia, nota)
-                VALUES (?, ?, 'M1LT', 'apertura_cubeta', ?, ?, ?)
-            """, (fecha, hora, env_1lt, ref, nota))
 
-        if env_05lt > 0:
-            conn.execute(
-                "UPDATE inventario SET stock = stock + ? WHERE sku = 'M05'",
-                (env_05lt,)
-            )
-            conn.execute("""
-                INSERT INTO movimientos_inv (fecha, hora, sku, tipo, cantidad, referencia, nota)
-                VALUES (?, ?, 'M05', 'apertura_cubeta', ?, ?, ?)
-            """, (fecha, hora, env_05lt, ref, nota))
+        if kg_chi > 0:
+            _mov_inv(conn, "CHI", "produccion", kg_chi, referencia,
+                     f"{kg_chi:.3f} kg de batch {batch_id}")
 
+        pool_antes = _pool_saldo(conn)
+        total      = pool_antes + lt_manteca
+
+        # solo cubetas COMPLETAS pasan al inventario; el resto sigue flotando
+        cubetas  = float(int((total + EPS_LT) / LT_POR_CUBETA))
+        remanente = max(0.0, round(total - cubetas * LT_POR_CUBETA, 4))
+
+        if cubetas > 0:
+            _mov_inv(conn, "CUB", "produccion", cubetas, referencia,
+                     f"{cubetas:.0f} cub de {total:.2f} lt acumulados")
+
+        _pool_asentar(conn, "produccion", lt_manteca, remanente, referencia,
+                      nota=f"{lt_manteca:.2f} lt de batch {batch_id}",
+                      cubetas_emitidas=cubetas)
         conn.commit()
+
+    return dict(
+        ya_cargado       = False,
+        kg_chi           = kg_chi,
+        lt_ingresados    = round(lt_manteca, 3),
+        pool_antes       = round(pool_antes, 3),
+        cubetas_emitidas = cubetas,
+        pool_despues     = remanente,
+    )
+
+
+def ajustar_pool_manteca(nuevo_saldo: float, nota: str = "") -> dict:
+    """
+    Fija el pool al conteo físico real (merma, derrame, recuento de bodega).
+    Registra la diferencia como ajuste en el ledger.
+    """
+    if nuevo_saldo < 0:
+        raise ValueError("el pool no puede ser negativo")
+    with conectar() as conn:
+        antes = _pool_saldo(conn)
+        _pool_asentar(conn, "ajuste", nuevo_saldo - antes, nuevo_saldo,
+                      "manual", nota or "ajuste por conteo físico")
+        conn.commit()
+    return dict(antes=round(antes, 3), despues=round(nuevo_saldo, 3),
+                delta=round(nuevo_saldo - antes, 3))
+
+
+# ── APERTURA DE CUBETA Y LITREADO ─────────────────────────────────────────────
+
+def abrir_cubeta(env_1lt: int, env_05lt: int, nota: str = "") -> dict:
+    """
+    Abre una cubeta sellada para litrear: -1 CUB, +19 lt al pool, y de ahí
+    salen los envases que se llenen.
+
+    Los litros que sobran de la cubeta abierta se quedan en el pool en vez de
+    desaparecer — antes, abrir una cubeta y llenar 10 envases de 1lt evaporaba
+    9 litros del sistema.
+    """
+    lt_envasados = env_1lt * LT_POR_ENV_1LT + env_05lt * LT_POR_ENV_05LT
+    ahora = datetime.now()
+    ref   = f"apertura_cubeta_{ahora.strftime('%Y-%m-%d_%H:%M')}"
+
+    with conectar() as conn:
+        disponible = _pool_saldo(conn) + LT_POR_CUBETA
+        if lt_envasados > disponible + EPS_LT:
+            raise ValueError(
+                f"no alcanzan los litros — la cubeta más el pool dan "
+                f"{disponible:.2f} lt y pediste envasar {lt_envasados:.2f} lt"
+            )
+
+        _mov_inv(conn, "CUB", "apertura_cubeta", -1, ref, nota)
+        saldo = round(_pool_saldo(conn) + LT_POR_CUBETA, 4)
+        _pool_asentar(conn, "apertura", LT_POR_CUBETA, saldo, ref,
+                      nota or "cubeta abierta para litrear",
+                      cubetas_emitidas=-1)
+
+        saldo = _pool_a_envases(conn, env_1lt, env_05lt, saldo, ref, nota)
+        conn.commit()
+
+    return dict(env_1lt=env_1lt, env_05lt=env_05lt,
+                lt_envasados=round(lt_envasados, 3), pool_despues=saldo)
+
+
+def litrear_de_pool(env_1lt: int, env_05lt: int, nota: str = "") -> dict:
+    """
+    Llena envases con la manteca de la cubeta ya abierta, sin romper una nueva.
+    Es lo que le da salida al remanente que dejó la producción.
+    """
+    lt_envasados = env_1lt * LT_POR_ENV_1LT + env_05lt * LT_POR_ENV_05LT
+
+    with conectar() as conn:
+        saldo = _pool_saldo(conn)
+        if lt_envasados > saldo + EPS_LT:
+            raise ValueError(
+                f"el pool solo tiene {saldo:.2f} lt y pediste envasar "
+                f"{lt_envasados:.2f} lt — abre una cubeta primero"
+            )
+        ref   = f"litreado_{datetime.now().strftime('%Y-%m-%d_%H:%M')}"
+        saldo = _pool_a_envases(conn, env_1lt, env_05lt, saldo, ref, nota)
+        conn.commit()
+
+    return dict(env_1lt=env_1lt, env_05lt=env_05lt,
+                lt_envasados=round(lt_envasados, 3), pool_despues=saldo)
+
+
+def _pool_a_envases(conn: sqlite3.Connection, env_1lt: int, env_05lt: int,
+                    saldo: float, referencia: str, nota: str) -> float:
+    """Convierte litros del pool en envases M1LT/M05. Devuelve el saldo nuevo."""
+    lt_envasados = env_1lt * LT_POR_ENV_1LT + env_05lt * LT_POR_ENV_05LT
+    if lt_envasados <= 0:
+        return saldo
+
+    if env_1lt > 0:
+        _mov_inv(conn, "M1LT", "apertura_cubeta", env_1lt, referencia, nota)
+    if env_05lt > 0:
+        _mov_inv(conn, "M05", "apertura_cubeta", env_05lt, referencia, nota)
+
+    saldo = max(0.0, round(saldo - lt_envasados, 4))
+    _pool_asentar(conn, "litreado", -lt_envasados, saldo, referencia,
+                  nota or f"{env_1lt}×1lt  {env_05lt}×½lt")
+    return saldo
 
 
 # ── FORMATO TICKET DE TEXTO ───────────────────────────────────────────────────

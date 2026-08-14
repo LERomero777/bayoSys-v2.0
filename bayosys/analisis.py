@@ -19,26 +19,29 @@ from calcular import (
     calcular_ing_manteca_real, calcular_ing_chi_real
 )
 from models import DENSIDAD_MANTECA, LT_POR_CUBETA
+from estilos import (
+    titulo_txt, sep_txt, ok_txt, alerta_txt, aviso_txt,
+    opcion_txt, dato_txt, c, imprimir, pedir, ANCHO_TEXTO,
+)
 
 
 # ── HELPERS DE FORMATO ───────────────────────────────────────────────────────
 
-def _sep(char="─", ancho=54):
-    print(char * ancho)
+def _sep(char=None, ancho=54, estilo="chrome"):
+    imprimir(sep_txt(char, ancho, estilo))
 
 def _titulo(texto):
-    print()
-    _sep("═")
-    print(f"  {texto}")
-    _sep("═")
+    imprimir()
+    imprimir(titulo_txt(texto, 54))
 
 def _subtitulo(texto):
-    print(f"\n  {texto}")
+    imprimir()
+    imprimir(f"  {c(texto, 'acento', negrita=True)}")
     _sep()
 
 def _fila(label, valor, extra="", ancho=28):
     extra_str = f"  {extra}" if extra else ""
-    print(f"  {label:<{ancho}} {valor}{extra_str}")
+    imprimir(f"  {label:<{ancho}} {valor}{extra_str}")
 
 def _pct_bar(pct, ancho=20):
     fill = int(pct / 100 * ancho)
@@ -58,7 +61,7 @@ def mostrar_dia(fecha: str):
 
     batches = cargar_batches(fecha)
     if not batches:
-        print(f"\n  sin registros para {fecha}")
+        imprimir(f"\n  sin registros para {fecha}")
         return
 
     cfg    = cargar_config()
@@ -78,22 +81,22 @@ def mostrar_dia(fecha: str):
     # ── producción ───────────────────────────────────────────────────
     _subtitulo("PRODUCCIÓN")
     _fila("grasa entrada",  f"{r.kg_grasa_dia:.1f} kg")
-    print()
+    imprimir()
     _fila("chicharrón",     f"{r.kg_chi_dia:.2f} kg",  _pct_bar(r.rend_chi_pct))
     _fila("manteca",        f"{r.kg_mant_dia:.2f} kg  /  {r.lt_mant_dia:.2f} lt",
           _pct_bar(r.rend_mant_pct))
     _fila("merma",          f"{r.merma_kg_dia:.2f} kg", _pct_bar(r.merma_pct))
-    print()
+    imprimir()
     _fila("cubetas potenc.", f"{r.cubetas_dia:.2f}  (si toda la manteca fuera a cubeta)")
 
     # ── batches ──────────────────────────────────────────────────────
     _subtitulo("BATCHES")
-    print(f"  {'#':<4} {'hora':<6} {'proveedor':<8} {'grasa':>7} {'chi':>7} {'rend%':>7}  temp")
+    imprimir(f"  {'#':<4} {'hora':<6} {'proveedor':<8} {'grasa':>7} {'chi':>7} {'rend%':>7}  temp")
     _sep()
     for b in batches:
         from calcular import calcular_batch
         rb = calcular_batch(b, cfg, r.n_batches)
-        print(f"  {b.id:<4} {b.hora:<6} {b.proveedor:<8} "
+        imprimir(f"  {b.id:<4} {b.hora:<6} {b.proveedor:<8} "
               f"{b.kg_grasa:>6.1f}k {b.kg_chi:>6.1f}k "
               f"{rb.rend_chi_pct:>6.1f}%  {b.temp_entrada}")
 
@@ -109,7 +112,7 @@ def mostrar_dia(fecha: str):
         _fila("gas",          "—  (capturar en cierre)")
     _sep("─", 44)
     _fila("COSTO TOTAL",      f"${r.c_total_dia:,.2f}")
-    print()
+    imprimir()
     _fila("costo/kg chi",     f"${r.c_chi_unit:.2f}/kg")
     _fila("costo/kg mant",    f"${r.c_mant_unit:.2f}/kg")
 
@@ -148,7 +151,7 @@ def mostrar_dia(fecha: str):
             _fila("cubeta (real)",
                   f"{v.cantidad:.1f} × ${v.precio:.0f}",
                   f"= ${v.cantidad * v.precio:,.2f}  (${v.precio / LT_POR_CUBETA:.2f}/lt)")
-        print()
+        imprimir()
         if mr["lt_litreada_total"] > 0:
             _fila("precio prom litreada", f"${mr['p_prom_lt']:.2f}/lt",
                   f"vs cubeta ${mr['p_cub_lt']:.2f}/lt  →  {mr['p_prom_lt']/mr['p_cub_lt']:.1f}× más/lt")
@@ -159,7 +162,7 @@ def mostrar_dia(fecha: str):
         _fila("proyección cubeta",
               f"{r.cubetas_dia:.2f} cub × ${cfg.precio_mant_cub:.0f}",
               f"= ${r.ing_mant:,.2f}  margen {_margen_str(r.margen_mant_cub_pct)}")
-        print(f"\n  (sin cierre registrado — mostrar real requiere cierre del día)")
+        imprimir(f"\n  (sin cierre registrado — mostrar real requiere cierre del día)")
         _fila("litreada 1lt",  f"${cfg.precio_mant_lt1:.0f}/env  = ${cfg.precio_mant_lt1:.2f}/lt")
         _fila("litreada ½lt",  f"${cfg.precio_mant_lt05:.0f}/env = ${cfg.precio_mant_lt05 / 0.5:.2f}/lt equiv")
         _fila("cubeta",        f"${cfg.precio_mant_cub:.0f}/19lt = ${p_cub_lt:.2f}/lt")
@@ -199,12 +202,12 @@ def mostrar_dia(fecha: str):
     _fila(f"premium ({cfg.margen_premium_pct:.0f}% margen)",f"${r.precio_prem_chi:.2f}/kg")
     actual = cfg.precio_chi_pub
     if actual < r.precio_min_chi:
-        print(f"\n  !! ALERTA: precio actual ${actual} está BAJO el costo real")
+        imprimir(f"\n  !! ALERTA: precio actual ${actual} está BAJO el costo real")
     elif actual < r.precio_justo_chi:
-        print(f"\n  !  precio actual ${actual} tiene margen ajustado")
+        imprimir("\n" + alerta_txt(f" precio actual ${actual} tiene margen ajustado"))
     else:
-        print(f"\n  ✓  precio actual ${actual} está en rango sano")
-    print()
+        imprimir("\n" + ok_txt(f" precio actual ${actual} está en rango sano"))
+    imprimir()
 
 
 # ── HISTÓRICO ────────────────────────────────────────────────────────────────
@@ -212,14 +215,14 @@ def mostrar_dia(fecha: str):
 def mostrar_historico(n_dias: int = 7):
     fechas = fechas_con_registro()
     if not fechas:
-        print("\n  sin registros históricos")
+        imprimir("\n  sin registros históricos")
         return
 
     fechas = fechas[-n_dias:]
     cfg    = cargar_config()
 
     _titulo(f"HISTÓRICO — últimos {len(fechas)} días")
-    print(f"  {'fecha':<12} {'bat':>3} {'grasa':>7} {'chi':>7} "
+    imprimir(f"  {'fecha':<12} {'bat':>3} {'grasa':>7} {'chi':>7} "
           f"{'rend%':>6} {'costo':>9} {'utilidad':>10}")
     _sep()
 
@@ -228,12 +231,12 @@ def mostrar_historico(n_dias: int = 7):
         if not batches:
             continue
         r = calcular_dia(batches, cfg)
-        print(f"  {fecha:<12} {r.n_batches:>3} "
+        imprimir(f"  {fecha:<12} {r.n_batches:>3} "
               f"{r.kg_grasa_dia:>6.1f}k {r.kg_chi_dia:>6.1f}k "
               f"{r.rend_chi_pct:>5.1f}% "
               f"${r.c_total_dia:>8,.0f} "
               f"${r.utilidad:>9,.0f}")
-    print()
+    imprimir()
 
 
 # ── COMPARATIVO DE PROVEEDORES ────────────────────────────────────────────────
@@ -247,7 +250,7 @@ def mostrar_proveedores(n_dias: int = 90):
     """
     todas_fechas = fechas_con_registro()
     if not todas_fechas:
-        print("\n  sin registros para comparar")
+        imprimir("\n  sin registros para comparar")
         return
 
     fechas = todas_fechas if n_dias is None else todas_fechas[-n_dias:]
@@ -260,45 +263,43 @@ def mostrar_proveedores(n_dias: int = 90):
         return
 
     if len(fechas) < len(todas_fechas):
-        print(f"\n  (mostrando últimos {len(fechas)} de {len(todas_fechas)} días con registro)")
+        imprimir(f"\n  (mostrando últimos {len(fechas)} de {len(todas_fechas)} días con registro)")
 
     comp = comparar_proveedores(todos_batches)
 
     _titulo("COMPARATIVO DE PROVEEDORES")
-    print(f"  {'proveedor':<12} {'batches':>7} {'kg grasa':>9} "
+    imprimir(f"  {'proveedor':<12} {'batches':>7} {'kg grasa':>9} "
           f"{'kg chi':>8} {'rend%':>7} {'$/kg chi real':>14}")
     _sep()
 
     ordenado = sorted(comp.items(), key=lambda x: x[1]["costo_real_kg_chi"])
     for i, (clave, datos) in enumerate(ordenado):
         marker = "← más económico" if i == 0 else ""
-        print(f"  {clave:<12} {datos['batches']:>7} "
+        imprimir(f"  {clave:<12} {datos['batches']:>7} "
               f"{datos['kg_grasa_total']:>8.1f}k "
               f"{datos['kg_chi_total']:>7.1f}k "
               f"{datos['rend_chi_pct']:>6.1f}% "
               f"${datos['costo_real_kg_chi']:>12.2f}  {marker}")
 
-    print()
-    print("  NOTA: costo_real_kg_chi = costo_grasa / kg_chi_obtenido")
-    print("        el más barato por kg grasa ≠ el más barato por kg chicharrón")
-    print()
+    imprimir()
+    imprimir("  NOTA: costo_real_kg_chi = costo_grasa / kg_chi_obtenido")
+    imprimir("        el más barato por kg grasa ≠ el más barato por kg chicharrón")
+    imprimir()
 
 
 # ── MENÚ ─────────────────────────────────────────────────────────────────────
 
 def menu_analisis():
     while True:
-        print("\n")
-        _sep("═")
-        print("  ANÁLISIS — bayoSys")
-        _sep("═")
-        print("  [1] resumen de hoy")
-        print("  [2] resumen de otro día")
-        print("  [3] histórico (últimos 7 días)")
-        print("  [4] comparativo de proveedores")
-        print("  [5] volver al menú principal")
+        imprimir("\n")
+        imprimir(titulo_txt("ANÁLISIS — bayoSys"))
+        imprimir(opcion_txt("1", "resumen de hoy"))
+        imprimir(opcion_txt("2", "resumen de otro día"))
+        imprimir(opcion_txt("3", "histórico (últimos 7 días)"))
+        imprimir(opcion_txt("4", "comparativo de proveedores"))
+        imprimir(opcion_txt("5", "volver al menú principal"))
 
-        op = input("\n  opción: ").strip()
+        op = pedir("\n  opción: ").strip()
 
         if op == "1":
             from config import fecha_hoy
@@ -307,19 +308,19 @@ def menu_analisis():
         elif op == "2":
             fechas = fechas_con_registro()
             if not fechas:
-                print("\n  sin registros disponibles")
+                imprimir("\n  sin registros disponibles")
                 continue
-            print("\n  fechas disponibles:")
+            imprimir("\n  fechas disponibles:")
             for i, f in enumerate(fechas[-10:], 1):
-                print(f"  [{i}] {f}")
+                imprimir(f"  [{i}] {f}")
             try:
-                idx = int(input("  selecciona: ").strip()) - 1
+                idx = int(pedir("  selecciona: ").strip()) - 1
                 if 0 <= idx < len(fechas[-10:]):
                     mostrar_dia(fechas[-10:][idx])
                 else:
-                    print("  ! opción inválida")
+                    imprimir(alerta_txt("opción inválida"))
             except ValueError:
-                print("  ! ingresa un número")
+                imprimir(alerta_txt("ingresa un número"))
 
         elif op == "3":
             mostrar_historico(7)
@@ -331,7 +332,7 @@ def menu_analisis():
             break
 
         else:
-            print("  ! opción inválida")
+            imprimir(alerta_txt("opción inválida"))
 
 
 if __name__ == "__main__":

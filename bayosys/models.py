@@ -59,6 +59,9 @@ class Batch:
     kg_grasa: float     # ANTES de echar al cazo
     kg_chi:   float     # DESPUÉS de sacar el chicharrón
     observaciones: str = ""
+    hora_inicio:   str = ""
+    hora_fin:      str = ""
+    kg_mant_real:  float = 0.0
 
 
 # ── RESULTADO DE BATCH ───────────────────────────────────────────────────────
@@ -138,10 +141,17 @@ class VentaLitreada:
     """
     Una transacción de venta de manteca litreada.
     lt_total se valida en cierre contra litros disponibles del día.
+
+    Los precios se congelan al momento de la venta — sin ellos, un cambio de
+    precio repreciaba todo el histórico. Los cierres viejos no los traen y
+    quedan en 0.0; calcular_ing_manteca_real cae a los precios de Config
+    para esos casos.
     """
     env_1lt:  int     # envases de 1 litro vendidos
     env_05lt: int     # envases de 500ml vendidos
     lt_total: float   # env_1lt×1.0 + env_05lt×0.5  (calculado y validado)
+    precio_1lt:  float = 0.0
+    precio_05lt: float = 0.0
 
 
 # ── CIERRE DEL DÍA ───────────────────────────────────────────────────────────

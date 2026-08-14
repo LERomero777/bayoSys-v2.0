@@ -21,14 +21,14 @@ from logger import log
 
 # ── FÓRMULAS COMPARTIDAS ─────────────────────────────────────────────────────
 
-def _produccion_y_rendimiento(kg_grasa: float, kg_chi: float) -> tuple:
+def _produccion_y_rendimiento(kg_grasa: float, kg_chi: float, kg_mant_real: float = 0.0) -> tuple:
     """
     Fórmulas de producción y rendimiento compartidas entre batch y día.
     Devuelve (kg_mant, lt_mant, cubetas, merma_kg,
               rend_chi_pct, rend_mant_pct, merma_pct) sin redondear —
     cada llamador redondea según su propia precisión.
     """
-    kg_mant  = kg_grasa * REND_MANT_KG
+    kg_mant  = kg_mant_real if kg_mant_real > 0 else kg_grasa * REND_MANT_KG
     lt_mant  = kg_mant / DENSIDAD_MANTECA
     cubetas  = kg_grasa / KG_GRASA_POR_CUBETA
     merma_kg = kg_grasa - kg_chi - kg_mant
@@ -50,7 +50,7 @@ def calcular_batch(batch: Batch, cfg: Config, n_batches: int) -> ResultadoBatch:
 
     # producción y rendimiento
     kg_mant, lt_mant, cubetas, merma_kg, rend_chi_pct, rend_mant_pct, merma_pct = \
-        _produccion_y_rendimiento(batch.kg_grasa, batch.kg_chi)
+        _produccion_y_rendimiento(batch.kg_grasa, batch.kg_chi, batch.kg_mant_real)
 
     # costos del batch — solo variables (sin fijos del día)
     c_grasa   = batch.kg_grasa * batch.costo_kg
@@ -113,9 +113,17 @@ def calcular_dia(batches: List[Batch], cfg: Config,
     kg_chi_dia   = sum(b.kg_chi   for b in batches)
 
     # producción y rendimiento
-    kg_mant_dia, lt_mant_dia, cubetas_dia, merma_kg_dia, \
-        rend_chi_pct, rend_mant_pct, merma_pct = \
-        _produccion_y_rendimiento(kg_grasa_dia, kg_chi_dia)
+    kg_mant_dia = sum(
+        b.kg_mant_real if b.kg_mant_real > 0 else b.kg_grasa * REND_MANT_KG
+        for b in batches
+    )
+    lt_mant_dia  = kg_mant_dia / DENSIDAD_MANTECA
+    cubetas_dia  = kg_grasa_dia / KG_GRASA_POR_CUBETA
+    merma_kg_dia = kg_grasa_dia - kg_chi_dia - kg_mant_dia
+
+    rend_chi_pct  = kg_chi_dia  / kg_grasa_dia * 100 if kg_grasa_dia > 0 else 0.0
+    rend_mant_pct = kg_mant_dia / kg_grasa_dia * 100 if kg_grasa_dia > 0 else 0.0
+    merma_pct     = 100 - rend_chi_pct - rend_mant_pct
 
     # costos
     c_grasa_dia = sum(b.kg_grasa * b.costo_kg for b in batches)
@@ -210,8 +218,12 @@ def calcular_ing_manteca_real(cierre, cfg: Config) -> dict:
     env_05lt_total   = sum(v.env_05lt for v in cierre.ventas_litreada)
     lt_litreada_total = lt_vendidos_1lt + lt_vendidos_05lt
 
-    ing_litreada_1lt  = env_1lt_total  * cfg.precio_mant_lt1
-    ing_litreada_05lt = env_05lt_total * cfg.precio_mant_lt05
+    # el precio de la venta manda; los cierres viejos no lo traen (0.0) y caen
+    # a Config — sin esto, cambiar un precio hoy repreciaba todo el histórico
+    ing_litreada_1lt  = sum(v.env_1lt  * (v.precio_1lt  or cfg.precio_mant_lt1)
+                            for v in cierre.ventas_litreada)
+    ing_litreada_05lt = sum(v.env_05lt * (v.precio_05lt or cfg.precio_mant_lt05)
+                            for v in cierre.ventas_litreada)
     ing_litreada      = ing_litreada_1lt + ing_litreada_05lt
 
     # cubetas

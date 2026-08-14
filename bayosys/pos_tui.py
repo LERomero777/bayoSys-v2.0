@@ -31,8 +31,8 @@ import os
 from pos import (
     iniciar_pos, agregar_chicharron, agregar_producto,
     agregar_producto_precio_variable, agregar_articulo_libre,
-    cobrar, hacer_corte, registrar_gasto, abrir_cubeta_pos,
-    carga_manual_stock, get_estado_inventario, get_resumen_turno,
+    cobrar, hacer_corte, registrar_gasto, abrir_cubeta_pos, litrear_pos,
+    carga_manual_stock, get_estado_inventario, get_resumen_turno, get_pool_lt,
     get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS,
     alta_cliente_mayoreo, listar_clientes_mayoreo, capturar_pedido_mayoreo,
     ajustar_pedido_mayoreo, entregar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
@@ -40,6 +40,13 @@ from pos import (
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy, cargar_config
+from models import LT_POR_CUBETA
+from estilos import (
+    init_colors, sadd, hline, marco, caja, divisor, encabezado, pie,
+    abrir_lienzo,
+    verificar_tamano, set_titulo_terminal, CAJA, UNICODE,
+    TEXTO, ACENTO, OK, AVISO, ALERTA, TITULO, DATO, TAB, BOTON, WARN, CHROME,
+)
 
 try:
     from pos_ticket import imprimir_ticket_fisico, ErrorImpresora
@@ -50,52 +57,19 @@ except ImportError:
         pass
 
 
-# ── COLORES ──────────────────────────────────────────────────────────────────
-
-def init_colors():
-    curses.start_color()
-    curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_WHITE,   -1)
-    curses.init_pair(2, curses.COLOR_CYAN,    -1)
-    curses.init_pair(3, curses.COLOR_GREEN,   -1)
-    curses.init_pair(4, curses.COLOR_YELLOW,  -1)
-    curses.init_pair(5, curses.COLOR_RED,     -1)
-    curses.init_pair(6, curses.COLOR_BLACK,   curses.COLOR_CYAN)
-    curses.init_pair(7, curses.COLOR_BLACK,   curses.COLOR_GREEN)
-    curses.init_pair(8, curses.COLOR_MAGENTA, -1)
-    curses.init_pair(9, curses.COLOR_BLACK,   curses.COLOR_YELLOW)
-
-C_NORM   = lambda: curses.color_pair(1)
-C_CYAN   = lambda: curses.color_pair(2)
-C_GREEN  = lambda: curses.color_pair(3)
-C_YELLOW = lambda: curses.color_pair(4)
-C_RED    = lambda: curses.color_pair(5)
-C_TAB    = lambda: curses.color_pair(6) | curses.A_BOLD
-C_BTN    = lambda: curses.color_pair(7) | curses.A_BOLD
-C_TITLE  = lambda: curses.color_pair(8) | curses.A_BOLD
-C_WARN   = lambda: curses.color_pair(9) | curses.A_BOLD
-
-
 # ── HELPERS DE DIBUJO ─────────────────────────────────────────────────────────
+# La paleta, los caracteres de borde y sadd/hline viven en estilos.py —
+# compartidos con tui.py para que las dos pantallas de curses no vuelvan
+# a divergir. Aquí solo queda lo específico del POS.
 
-def sadd(win, y, x, text, attr=0):
-    h, w = win.getmaxyx()
-    if y < 0 or y >= h or x < 0:
-        return
-    max_len = w - x - 1
-    if max_len <= 0:
-        return
-    try:
-        win.addstr(y, x, str(text)[:max_len], attr)
-    except curses.error:
-        pass
-
-def hline(win, y, x, w, char="─", attr=0):
-    sadd(win, y, x, char * min(w, win.getmaxyx()[1] - x - 1), attr)
+# El lienzo es de tamaño fijo, así que el split se elige a propósito en vez
+# de derivarlo del ancho de la terminal: 34 columnas alcanzan para el nombre
+# de producto más largo del catálogo más la columna de stock.
+ANCHO_PANEL_IZQ = 34
 
 def flash_msg(win, h, msg, color=None):
     if color is None:
-        color = C_GREEN()
+        color = OK()
     sadd(win, h - 2, 1, " " * (win.getmaxyx()[1] - 2))
     sadd(win, h - 2, 2, f" {msg} ", color)
     win.refresh()
@@ -106,7 +80,7 @@ def flash_msg(win, h, msg, color=None):
 
 def pedir_input(stdscr, prompt: str, y: int, x: int, ancho: int = 20) -> str:
     curses.curs_set(1)
-    sadd(stdscr, y, x, prompt, C_CYAN() | curses.A_BOLD)
+    sadd(stdscr, y, x, prompt, ACENTO() | curses.A_BOLD)
     sadd(stdscr, y, x + len(prompt), " " * ancho)
     stdscr.refresh()
 
@@ -130,7 +104,7 @@ def pedir_input(stdscr, prompt: str, y: int, x: int, ancho: int = 20) -> str:
         elif 32 <= key <= 126:
             if len(buf) < ancho - 1:
                 buf.append(chr(key))
-                sadd(stdscr, y, cx + len(buf) - 1, chr(key), C_CYAN())
+                sadd(stdscr, y, cx + len(buf) - 1, chr(key), ACENTO())
 
     curses.curs_set(0)
     return "".join(buf).strip()
@@ -147,7 +121,7 @@ def pedir_float_modal(stdscr, prompt: str, y: int, x: int) -> float:
                 return val
         except ValueError:
             pass
-        sadd(stdscr, y + 1, x, "  ! número inválido  ", C_RED())
+        sadd(stdscr, y + 1, x, "  ! número inválido  ", ALERTA())
         stdscr.refresh()
         curses.napms(800)
         sadd(stdscr, y + 1, x, " " * 22)
@@ -179,13 +153,13 @@ def pedir_kg_o_monto_modal(stdscr, nombre: str, precio_kg: float, y: int, x: int
     ancho_label = max(len(label_kg), len(label_monto))
     cx = x + ancho_label
 
-    sadd(stdscr, y,     x, label_kg,    C_CYAN() | curses.A_BOLD)
-    sadd(stdscr, y + 1, x, label_monto, C_CYAN() | curses.A_BOLD)
+    sadd(stdscr, y,     x, label_kg,    ACENTO() | curses.A_BOLD)
+    sadd(stdscr, y + 1, x, label_monto, ACENTO() | curses.A_BOLD)
 
     kg = pedir_float_modal(stdscr, "", y, cx)
     if kg > 0:
         monto = round(kg * precio_kg, 2) if precio_kg > 0 else 0.0
-        sadd(stdscr, y + 1, cx, f"{monto:.2f}  (calculado)", C_GREEN())
+        sadd(stdscr, y + 1, cx, f"{monto:.2f}  (calculado)", OK())
         stdscr.refresh()
         curses.napms(700)
         return round(kg, 3), monto
@@ -194,13 +168,13 @@ def pedir_kg_o_monto_modal(stdscr, nombre: str, precio_kg: float, y: int, x: int
     if monto <= 0:
         return 0.0, 0.0
     if precio_kg <= 0:
-        sadd(stdscr, y, x, "  ! precio no configurado  ", C_RED())
+        sadd(stdscr, y, x, "  ! precio no configurado  ", ALERTA())
         stdscr.refresh()
         curses.napms(1000)
         return 0.0, 0.0
 
     kg = round(monto / precio_kg, 3)
-    sadd(stdscr, y, cx, f"{kg:.3f}  (calculado)", C_GREEN())
+    sadd(stdscr, y, cx, f"{kg:.3f}  (calculado)", OK())
     stdscr.refresh()
     curses.napms(700)
     return kg, round(monto, 2)
@@ -223,7 +197,7 @@ def pedir_cantidad_ajuste_modal(stdscr, prompt: str, y: int, x: int) -> float:
     Primero [+]/[-] para la dirección, luego la magnitud (acepta decimales).
     Devuelve el valor ya con signo aplicado. Esc en la dirección cancela (0.0).
     """
-    sadd(stdscr, y, x, "  [+] sumar   [-] restar  ", C_CYAN() | curses.A_BOLD)
+    sadd(stdscr, y, x, "  [+] sumar   [-] restar  ", ACENTO() | curses.A_BOLD)
     stdscr.refresh()
     while True:
         key = stdscr.getch()
@@ -246,23 +220,25 @@ def pedir_cantidad_ajuste_modal(stdscr, prompt: str, y: int, x: int) -> float:
 def _color_stock(sku: str, tipo_venta: str, stock: float):
     """Retorna (stock_str, color) según tipo de producto y nivel de stock."""
     if tipo_venta == "libre":
-        return "", C_CYAN()
+        # no lleva inventario: se captura descripción y precio al vender.
+        # Un guion deja la columna alineada en vez de un hueco.
+        return "—" if UNICODE else "-", CHROME()
     if tipo_venta == "peso":
         # chicharrón — en kg
         if stock <= 0:
-            return "sin stock", C_RED()
+            return "sin stock", ALERTA()
         elif stock <= 5:
-            return f"{stock:.2f} kg", C_YELLOW()
+            return f"{stock:.2f} kg", AVISO()
         else:
-            return f"{stock:.2f} kg", C_GREEN()
+            return f"{stock:.2f} kg", OK()
     else:
         # piezas — normal, variable
         if stock <= 0:
-            return "sin stock", C_RED()
+            return "sin stock", ALERTA()
         elif stock <= 3:
-            return f"{stock:.0f} pza", C_YELLOW()
+            return f"{stock:.0f} pza", AVISO()
         else:
-            return f"{stock:.0f} pza", C_GREEN()
+            return f"{stock:.0f} pza", OK()
 
 
 def _tecla_a_idx(key: int) -> int:
@@ -274,56 +250,79 @@ def _tecla_a_idx(key: int) -> int:
 
 # ── PANEL IZQUIERDO — DINÁMICO ────────────────────────────────────────────────
 
-def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, menu: list, msg: str = ""):
+def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, menu: list):
     """
     Dibuja el panel de productos leyendo 'menu' — lista de rows de get_menu_pos().
     Cada row tiene: sku, descripcion, tipo_venta, orden_menu, precio_venta, stock.
     Las teclas 1-9 se asignan según posición en la lista (orden_menu en DB).
+
+    Devuelve las filas donde dibujó divisiones, para que el loop principal
+    pueda empalmarlas con la columna que comparte con el panel del ticket.
     """
     h, w = win.getmaxyx()
     win.erase()
-    win.border()
-    sadd(win, 0, 2, " PRODUCTOS ", C_TITLE())
+    marco(win, "productos")
+
+    # las columnas se derivan del ancho del panel en vez de estar fijas,
+    # para que el stock quede alineado a la derecha sin importar el split
+    x_stock      = w - 12
+    ancho_nombre = x_stock - 7
+
+    # última fila utilizable: h-1 es el borde inferior y no se toca. Sin este
+    # límite, en una terminal chica el menú se dibuja encima del marco.
+    ultima = h - 1
 
     y = 2
     for idx, row in enumerate(menu):
+        if y >= ultima:
+            break
         tecla     = str(idx + 1) if idx < 9 else "?"
         sku       = row["sku"]
-        nombre    = row["descripcion"][:13]
+        nombre    = row["descripcion"][:ancho_nombre]
         tipo      = row["tipo_venta"]
         stock     = inv_dict.get(sku, {}).get("stock", 0)
         stock_str, color = _color_stock(sku, tipo, stock)
 
-        sadd(win, y, 2,  f"[{tecla}]",          C_CYAN() | curses.A_BOLD)
-        sadd(win, y, 6,  f"{nombre:<13}",        color)
-        sadd(win, y, 20, stock_str,              color)
+        sadd(win, y, 2,       f"[{tecla}]",                  ACENTO() | curses.A_BOLD)
+        sadd(win, y, 6,       f"{nombre:<{ancho_nombre}}",   TEXTO())
+        sadd(win, y, x_stock, f"{stock_str:>10}",            color)
         y += 1
 
+    # las acciones se agrupan por naturaleza: primero las que mueven
+    # inventario o dinero, luego las de solo lectura, y aparte las de salida.
+    # None = división entre grupos.
+    acciones = [
+        None,
+        ("G", "Registrar gasto",                AVISO()),
+        ("A", "Abrir cubeta",                   AVISO()),
+        ("L", f"Litrear {get_pool_lt():.1f}lt", AVISO()),
+        ("I", "Inventario",                     ACENTO()),
+        ("H", "Historial",                      ACENTO()),
+        ("M", "Mayoreo",                        AVISO()),
+        None,
+        ("C", "Corte de caja",                  AVISO()),
+        ("Q", "Salir",                          ALERTA()),
+    ]
+
     y += 1
-    hline(win, y, 1, w - 2)
-    y += 1
+    filas_divisor = []
+    for entrada in acciones:
+        if y >= ultima:
+            break
+        if entrada is None:
+            filas_divisor.append(y)
+            divisor(win, y, 0, w)
+        else:
+            tecla, etiqueta, color = entrada
+            sadd(win, y, 2, f"[{tecla}]", color | curses.A_BOLD)
+            sadd(win, y, 6, etiqueta,     TEXTO())
+        y += 1
 
-    sadd(win, y, 2, "[G]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Registrar gasto",  C_NORM()); y += 1
-    sadd(win, y, 2, "[A]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Abrir cubeta",     C_NORM()); y += 1
-    sadd(win, y, 2, "[I]", C_CYAN()   | curses.A_BOLD)
-    sadd(win, y, 6, "Inventario",       C_NORM()); y += 1
-    sadd(win, y, 2, "[H]", C_CYAN()   | curses.A_BOLD)
-    sadd(win, y, 6, "Historial",        C_NORM()); y += 1
-    sadd(win, y, 2, "[M]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Mayoreo",          C_NORM()); y += 1
-    hline(win, y, 1, w - 2); y += 1
-
-    sadd(win, y, 2, "[C]", C_YELLOW() | curses.A_BOLD)
-    sadd(win, y, 6, "Corte de caja",   C_NORM()); y += 1
-    sadd(win, y, 2, "[Q]", C_RED()    | curses.A_BOLD)
-    sadd(win, y, 6, "Salir",           C_NORM())
-
-    if msg:
-        sadd(win, h - 2, 1, msg[:w - 3], C_GREEN())
-
-    win.refresh()
+    # sin refresh() propio: las subventanas comparten el buffer de stdscr,
+    # así que el loop principal pinta todo de una sola vez. Refrescar aquí
+    # hacía que la columna compartida se repintara tres veces por frame
+    # (borde izq → borde der → empalme) y parpadeara.
+    return filas_divisor
 
 
 # ── PANEL DERECHO — TICKET ────────────────────────────────────────────────────
@@ -331,36 +330,36 @@ def draw_panel_izq(win, sesion: SesionPOS, inv_dict: dict, menu: list, msg: str 
 def draw_panel_ticket(win, sesion: SesionPOS):
     h, w = win.getmaxyx()
     win.erase()
-    win.border()
-    sadd(win, 0, 2, " TICKET ACTUAL ", C_TITLE())
+    marco(win, "ticket actual")
 
     if sesion.ticket is None or sesion.ticket.vacio():
-        sadd(win, 2, 2, "  (vacío)", C_NORM())
-        win.refresh()
+        sadd(win, 2, 3, "sin carga registrada", CHROME())
+        sadd(win, h - 2, 3, "en espera — selecciona un producto", CHROME())
         return
 
     y = 2
     for idx, item in enumerate(sesion.ticket.items):
         if y >= h - 5:
-            sadd(win, y, 2, f"  ... +{len(sesion.ticket.items) - idx} más", C_YELLOW())
+            sadd(win, y, 3, f"... +{len(sesion.ticket.items) - idx} más", AVISO())
             break
         # formato cantidad según tipo
         if item.sku == "CHI":
             cant = f"{item.cantidad:.3f}kg"
         else:
             cant = f"{item.cantidad:.0f} pza"
-        linea = f"[{idx+1}] {item.descripcion[:15]:<15} {cant:>8}  ${item.subtotal:>8,.2f}"
-        sadd(win, y, 1, linea, C_NORM())
+        # el renglón se pinta por partes para que el importe destaque
+        # sobre la descripción — es el dato que el operador verifica
+        sadd(win, y, 2,      f"[{idx+1}]",                  CHROME())
+        sadd(win, y, 6,      f"{item.descripcion[:18]:<18}", TEXTO())
+        sadd(win, y, 25,     f"{cant:>9}",                   DATO())
+        sadd(win, y, w - 13, f"${item.subtotal:>10,.2f}",    TEXTO())
         y += 1
 
-    hline(win, h - 5, 1, w - 2)
-    sadd(win, h - 4, 2, "TOTAL", C_CYAN() | curses.A_BOLD)
-    sadd(win, h - 4, w - 14, f"${sesion.ticket.total:>10,.2f}",
-         C_GREEN() | curses.A_BOLD)
-    sadd(win, h - 2, 2, "[X] quitar item   [P] cobrar   [Esc] limpiar",
-         C_NORM())
-
-    win.refresh()
+    divisor(win, h - 5, 0, w)
+    sadd(win, h - 4, 3,      "TOTAL", ACENTO() | curses.A_BOLD)
+    sadd(win, h - 4, w - 14, f"${sesion.ticket.total:>11,.2f}",
+         OK() | curses.A_BOLD)
+    sadd(win, h - 2, 3, "[X] quitar item   [P] cobrar   [Esc] limpiar", CHROME())
 
 
 # ── FLUJO COBRO ───────────────────────────────────────────────────────────────
@@ -377,23 +376,28 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
     my    = h // 2 - 7
     mx    = w // 2 - 18
 
+    ANCHO_MODAL = 38   # el modal es de ancho fijo: es una ficha de cobro,
+                       # no un panel que deba estirarse con la pantalla
+
     def _dibujar_caja():
         for i in range(16):
-            sadd(stdscr, my + i, mx, " " * 38)
-        sadd(stdscr, my,      mx+1, f"┌{'─'*36}┐", C_CYAN())
-        sadd(stdscr, my + 1,  mx+1, f"│ COBRAR{' '*29}│", C_CYAN())
-        sadd(stdscr, my + 2,  mx+1, f"│ TOTAL: ${total:>26,.2f} │",
-             C_GREEN() | curses.A_BOLD)
-        sadd(stdscr, my + 3,  mx+1, f"├{'─'*36}┤", C_CYAN())
-        sadd(stdscr, my + 4,  mx+1, f"│ MÉTODO DE PAGO:{' '*20}│", C_CYAN())
-        sadd(stdscr, my + 5,  mx+1, f"│  [1] Efectivo{' '*22}│", C_NORM())
-        sadd(stdscr, my + 6,  mx+1, f"│  [2] Transferencia{' '*17}│", C_NORM())
-        sadd(stdscr, my + 7,  mx+1, f"│  [3] Tarjeta{' '*23}│", C_NORM())
-        sadd(stdscr, my + 8,  mx+1, f"│  [Esc] Cancelar{' '*19}│", C_NORM())
-        sadd(stdscr, my + 9,  mx+1, f"├{'─'*36}┤", C_CYAN())
-        for i in range(10, 15):
-            sadd(stdscr, my + i, mx+1, f"│{' '*36}│", C_CYAN())
-        sadd(stdscr, my + 15, mx+1, f"└{'─'*36}┘", C_CYAN())
+            sadd(stdscr, my + i, mx, " " * (ANCHO_MODAL + 1))
+        caja(stdscr, my, mx + 1, 16, ANCHO_MODAL, "cobrar")
+
+        sadd(stdscr, my + 2, mx + 3,  "TOTAL", ACENTO() | curses.A_BOLD)
+        sadd(stdscr, my + 2, mx + 23, f"${total:>13,.2f}", OK() | curses.A_BOLD)
+        divisor(stdscr, my + 3, mx + 1, ANCHO_MODAL, pesado=False)
+
+        sadd(stdscr, my + 4, mx + 3, "MÉTODO DE PAGO", CHROME())
+        for i, (tecla, etiqueta) in enumerate((("1", "Efectivo"),
+                                               ("2", "Transferencia"),
+                                               ("3", "Tarjeta"))):
+            sadd(stdscr, my + 5 + i, mx + 4, f"[{tecla}]", ACENTO() | curses.A_BOLD)
+            sadd(stdscr, my + 5 + i, mx + 8, etiqueta,     TEXTO())
+        sadd(stdscr, my + 8, mx + 4,  "[Esc]",    ALERTA() | curses.A_BOLD)
+        sadd(stdscr, my + 8, mx + 10, "Cancelar", TEXTO())
+
+        divisor(stdscr, my + 9, mx + 1, ANCHO_MODAL, pesado=False)
         stdscr.refresh()
 
     METODOS = {ord("1"): "efectivo", ord("2"): "transfer", ord("3"): "tarjeta"}
@@ -424,22 +428,22 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         cambio = abs(restante)
         if cambio > 0:
             sadd(stdscr, my + 11, mx + 2,
-                 f"  CAMBIO: ${cambio:>8.2f}          ", C_YELLOW() | curses.A_BOLD)
+                 f"  CAMBIO: ${cambio:>8.2f}          ", AVISO() | curses.A_BOLD)
         else:
             sadd(stdscr, my + 11, mx + 2,
-                 f"  Exacto ✓                    ", C_GREEN())
+                 f"  Exacto ✓                    ", OK())
         sadd(stdscr, my + 14, mx + 2,
-             "  [Enter] cobrar  [Esc] cancelar", C_NORM())
+             "  [Enter] cobrar  [Esc] cancelar", TEXTO())
         stdscr.refresh()
         if not _esperar_confirmacion(stdscr):
             return ""
     else:
         # necesita segundo método — loopea hasta un método válido y distinto al primero
         sadd(stdscr, my + 11, mx + 2,
-             f"  Falta: ${restante:>8.2f}              ", C_RED() | curses.A_BOLD)
+             f"  Falta: ${restante:>8.2f}              ", ALERTA() | curses.A_BOLD)
         while True:
             sadd(stdscr, my + 12, mx + 2,
-                 "  2do método: [1]Ef [2]Tr [3]Ta [Esc]", C_CYAN())
+                 "  2do método: [1]Ef [2]Tr [3]Ta [Esc]", ACENTO())
             stdscr.refresh()
             key = stdscr.getch()
             if key == 27:
@@ -449,7 +453,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
                 break
             if key in METODOS:
                 sadd(stdscr, my + 12, mx + 2,
-                     "  ! ya usaste ese método — elige otro", C_RED())
+                     "  ! ya usaste ese método — elige otro", ALERTA())
                 stdscr.refresh()
                 curses.napms(900)
 
@@ -458,16 +462,16 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         total_pagado   = monto1 + monto2
         if total_pagado < total - 0.01:
             sadd(stdscr, my + 14, mx + 2,
-                 f"  FALTA ${total-total_pagado:.2f} — [Enter]", C_RED() | curses.A_BOLD)
+                 f"  FALTA ${total-total_pagado:.2f} — [Enter]", ALERTA() | curses.A_BOLD)
             stdscr.refresh()
             stdscr.getch()
             return "retry"
         cambio = round(total_pagado - total, 2)
         if cambio > 0:
             sadd(stdscr, my + 13, mx + 2,
-                 f"  CAMBIO: ${cambio:.2f}          ", C_YELLOW() | curses.A_BOLD)
+                 f"  CAMBIO: ${cambio:.2f}          ", AVISO() | curses.A_BOLD)
         sadd(stdscr, my + 14, mx + 2,
-             "  [Enter] cobrar  [Esc] cancelar  ", C_NORM())
+             "  [Enter] cobrar  [Esc] cancelar  ", TEXTO())
         stdscr.refresh()
         if not _esperar_confirmacion(stdscr):
             return ""
@@ -486,7 +490,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 
         sadd(stdscr, my + 14, mx + 2,
              f"  Ticket #{ticket_id:04d}  [P]imprimir [Enter]",
-             C_GREEN() | curses.A_BOLD)
+             OK() | curses.A_BOLD)
         stdscr.refresh()
         key = stdscr.getch()
 
@@ -510,13 +514,12 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 def pantalla_inventario(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    sadd(stdscr, 0, 0, " INVENTARIO ".center(w), C_TITLE())
-    hline(stdscr, 1, 0, w)
+    encabezado(stdscr, "inventario", "escaneo de bodega")
 
     inv = get_estado_inventario()
     sadd(stdscr, 2, 2,
-         f"{'SKU':<8} {'Descripción':<20} {'Tipo':<10} {'Stock':>7} {'Precio':>10}",
-         C_CYAN())
+         f"{'SKU':<8} {'Descripción':<20} {'Tipo':<10} {'Stock':>9} {'Precio':>10}",
+         ACENTO())
     hline(stdscr, 3, 2, w - 4)
 
     for i, row in enumerate(inv):
@@ -526,12 +529,23 @@ def pantalla_inventario(stdscr):
         stock_str, color = _color_stock(row["sku"], tipo, stock)
         sadd(stdscr, y, 2,
              f"{row['sku']:<8} {row['descripcion']:<20} {tipo:<10} "
-             f"{stock_str:>7}  ${row['precio_venta']:>9.2f}",
-             color if tipo != "libre" else C_NORM())
+             f"{stock_str:>9}  ${row['precio_venta']:>9.2f}",
+             color if tipo != "libre" else TEXTO())
 
-    hline(stdscr, h - 3, 0, w)
-    sadd(stdscr, h - 2, 2,
-         "[C] carga manual   [A] abrir cubeta   [Esc] volver", C_NORM())
+    # manteca a granel — la cubeta fraccionada que dejó la producción
+    pool = get_pool_lt()
+    y_pool = 4 + len(inv) + 1
+    hline(stdscr, y_pool, 2, w - 4)
+    sadd(stdscr, y_pool + 1, 2,
+         f"{'GRANEL':<8} {'Manteca a granel':<20} {'pool':<10} "
+         f"{pool:>6.2f} lt",
+         OK() if pool > 0 else TEXTO())
+    sadd(stdscr, y_pool + 2, 2,
+         f"         faltan {max(0.0, LT_POR_CUBETA - pool):.2f} lt para completar cubeta",
+         TEXTO())
+
+    pie(stdscr, ("C", "carga manual"), ("A", "abrir cubeta"),
+        ("L", "litrear granel"), ("Esc", "volver"))
     stdscr.refresh()
 
     while True:
@@ -548,9 +562,25 @@ def pantalla_inventario(stdscr):
                         msg = carga_manual_stock(sku_raw, delta)
                         flash_msg(stdscr, h, msg)
                     except ErrorPOS as e:
-                        flash_msg(stdscr, h, str(e), C_RED())
+                        flash_msg(stdscr, h, str(e), ALERTA())
             break
-        elif key in (ord("a"), ord("A")):
+        elif key in (ord("a"), ord("A"), ord("l"), ord("L")):
+            # [A] rompe una cubeta sellada; [L] envasa del granel que ya está abierto
+            desde_cubeta = key in (ord("a"), ord("A"))
+
+            def _pedir_envases(stdscr):
+                e1  = pedir_int_modal(stdscr, "envases 1lt: ", h - 4, 2)
+                e05 = pedir_int_modal(stdscr, "envases ½lt: ", h - 4, 24)
+                return e1, e05
+
+            e1, e05 = _modal_bloqueante(stdscr, _pedir_envases)
+            if e1 > 0 or e05 > 0:
+                try:
+                    r = (abrir_cubeta_pos(e1, e05) if desde_cubeta
+                         else litrear_pos(e1, e05))
+                    flash_msg(stdscr, h, r["mensaje"])
+                except ErrorPOS as e:
+                    flash_msg(stdscr, h, str(e), ALERTA())
             break
 
 
@@ -559,13 +589,12 @@ def pantalla_inventario(stdscr):
 def pantalla_historial(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    sadd(stdscr, 0, 0, " HISTORIAL DE TICKETS ".center(w), C_TITLE())
-    hline(stdscr, 1, 0, w)
+    encabezado(stdscr, "historial de tickets", "registro del turno")
 
     tickets = get_historial_tickets()
     sadd(stdscr, 2, 2,
          f"{'#':>4}  {'hora':<6}  {'ef':>8}  {'tr':>8}  {'ta':>8}  {'total':>9}",
-         C_CYAN())
+         ACENTO())
     hline(stdscr, 3, 2, w - 4)
 
     for i, t in enumerate(tickets[-20:]):
@@ -575,10 +604,9 @@ def pantalla_historial(stdscr):
              f"${t['pago_transfer']:>7.0f}  "
              f"${t['pago_tarjeta']:>7.0f}  "
              f"${t['total']:>8.2f}",
-             C_NORM())
+             TEXTO())
 
-    hline(stdscr, h - 3, 0, w)
-    sadd(stdscr, h - 2, 2, "[Esc] volver", C_NORM())
+    pie(stdscr, ("Esc", "volver"))
     stdscr.refresh()
     while True:
         key = stdscr.getch()
@@ -588,31 +616,30 @@ def pantalla_historial(stdscr):
 # ── PANTALLA PEDIDOS DE MAYOREO ──────────────────────────────────────────────
 
 _COLOR_PRIORIDAD = {
-    "muy_alta": lambda: C_RED()   | curses.A_BOLD,
-    "alta":     lambda: C_YELLOW() | curses.A_BOLD,
-    "media":    lambda: C_YELLOW(),
-    "baja":     lambda: C_CYAN(),
+    "muy_alta": lambda: ALERTA()   | curses.A_BOLD,
+    "alta":     lambda: AVISO() | curses.A_BOLD,
+    "media":    lambda: AVISO(),
+    "baja":     lambda: ACENTO(),
 }
 
 def pantalla_status_pedidos(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    sadd(stdscr, 0, 0, " PEDIDOS DE MAYOREO — PENDIENTES ".center(w), C_TITLE())
-    hline(stdscr, 1, 0, w)
+    encabezado(stdscr, "pedidos de mayoreo", "pendientes")
 
     pedidos = get_pedidos_mayoreo_pendientes()
 
     if not pedidos:
-        sadd(stdscr, 3, 2, "  sin pedidos pendientes", C_NORM())
+        sadd(stdscr, 3, 2, "  cola despejada — sin pedidos en espera", CHROME())
     else:
         sadd(stdscr, 2, 2,
              f"{'#':>4}  {'prioridad':<9}  {'cliente':<16}  {'kg':>6}  {'precio':>8}  {'total':>9}  entrega",
-             C_CYAN())
+             ACENTO())
         hline(stdscr, 3, 2, w - 4)
 
         for i, p in enumerate(pedidos[: h - 6]):
             y     = 4 + i
-            color = _COLOR_PRIORIDAD.get(p["prioridad"], lambda: C_NORM())()
+            color = _COLOR_PRIORIDAD.get(p["prioridad"], lambda: TEXTO())()
             total = p["kg"] * p["precio_kg_pactado"]
             sadd(stdscr, y, 2,
                  f"{p['id']:>4}  {p['prioridad']:<9}  {p['cliente_nombre'][:16]:<16}  "
@@ -620,8 +647,7 @@ def pantalla_status_pedidos(stdscr):
                  f"${total:>8.0f}  {p['fecha_entrega']}",
                  color)
 
-    hline(stdscr, h - 3, 0, w)
-    sadd(stdscr, h - 2, 2, "[Esc] volver", C_NORM())
+    pie(stdscr, ("Esc", "volver"))
     stdscr.refresh()
 
     while True:
@@ -635,7 +661,7 @@ def flujo_alta_cliente_mayoreo(stdscr) -> str:
     """Da de alta un cliente nuevo en el tabulador de mayoreo."""
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    sadd(stdscr, h // 2 - 4, w // 2 - 16, "NUEVO CLIENTE MAYOREO", C_TITLE())
+    sadd(stdscr, h // 2 - 4, w // 2 - 16, "NUEVO CLIENTE MAYOREO", TITULO())
     stdscr.refresh()
 
     nombre = pedir_input(stdscr, "nombre: ", h // 2 - 2, w // 2 - 16, 25)
@@ -660,16 +686,15 @@ def flujo_capturar_pedido_mayoreo(stdscr) -> str:
 
     if not clientes:
         sadd(stdscr, h // 2, w // 2 - 20,
-             "  sin clientes — dalos de alta primero  ", C_RED())
+             "  sin clientes en registro — da de alta primero  ", ALERTA())
         stdscr.refresh()
         stdscr.getch()
         return ""
 
-    sadd(stdscr, 0, 0, " CAPTURAR PEDIDO — MAYOREO ".center(w), C_TITLE())
-    hline(stdscr, 1, 0, w)
+    encabezado(stdscr, "capturar pedido", "mayoreo")
     for i, c in enumerate(clientes[:9]):
         sadd(stdscr, 3 + i, 2,
-             f"[{i+1}] {c['nombre']:<20}  ${c['precio_kg']:.0f}/kg", C_NORM())
+             f"[{i+1}] {c['nombre']:<20}  ${c['precio_kg']:.0f}/kg", TEXTO())
     stdscr.refresh()
 
     tecla_key = stdscr.getch()
@@ -690,7 +715,7 @@ def flujo_capturar_pedido_mayoreo(stdscr) -> str:
         fecha_entrega = (date.today() + timedelta(days=1)).isoformat()
 
     sadd(stdscr, my + 2, 2,
-         "prioridad: [1]muy_alta [2]alta [3]media [4]baja", C_CYAN())
+         "prioridad: [1]muy_alta [2]alta [3]media [4]baja", ACENTO())
     stdscr.refresh()
     p_key = stdscr.getch()
     prioridad = {
@@ -709,15 +734,13 @@ def flujo_capturar_pedido_mayoreo(stdscr) -> str:
 def pantalla_corte(stdscr, sesion: SesionPOS) -> str:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    sadd(stdscr, 0, 0,
-         f" CORTE DE CAJA — batch#{sesion.batch_id} ".center(w), C_TITLE())
-    hline(stdscr, 1, 0, w)
+    encabezado(stdscr, "corte de caja", f"batch#{sesion.batch_id}")
 
     try:
         corte = hacer_corte(sesion)
     except ErrorPOS as e:
-        sadd(stdscr, 3, 2, f"! {e}", C_RED())
-        sadd(stdscr, 5, 2, "[Esc] volver", C_NORM())
+        sadd(stdscr, 3, 2, f"! {e}", ALERTA())
+        sadd(stdscr, 5, 2, "[Esc] volver", TEXTO())
         stdscr.refresh()
         stdscr.getch()
         return ""
@@ -725,27 +748,26 @@ def pantalla_corte(stdscr, sesion: SesionPOS) -> str:
     y = 2
     def fila(label, valor, color=None):
         nonlocal y
-        sadd(stdscr, y, 4, f"{label:<28}", C_NORM())
-        sadd(stdscr, y, 32, valor, color or C_NORM())
+        sadd(stdscr, y, 4, f"{label:<28}", TEXTO())
+        sadd(stdscr, y, 32, valor, color or TEXTO())
         y += 1
 
     fila("tickets del turno",   f"{corte['n_tickets']}")
     y += 1
-    fila("ventas efectivo",     f"${corte['ventas_efectivo']:,.2f}", C_GREEN())
-    fila("ventas transferencia", f"${corte['ventas_transfer']:,.2f}", C_GREEN())
-    fila("ventas tarjeta",      f"${corte['ventas_tarjeta']:,.2f}",  C_GREEN())
+    fila("ventas efectivo",     f"${corte['ventas_efectivo']:,.2f}", OK())
+    fila("ventas transferencia", f"${corte['ventas_transfer']:,.2f}", OK())
+    fila("ventas tarjeta",      f"${corte['ventas_tarjeta']:,.2f}",  OK())
     hline(stdscr, y, 4, 40); y += 1
-    fila("TOTAL VENTAS",        f"${corte['total_ventas']:,.2f}", C_GREEN() | curses.A_BOLD)
-    fila("gastos del turno",    f"${corte['total_gastos']:,.2f}", C_YELLOW())
+    fila("TOTAL VENTAS",        f"${corte['total_ventas']:,.2f}", OK() | curses.A_BOLD)
+    fila("gastos del turno",    f"${corte['total_gastos']:,.2f}", AVISO())
     hline(stdscr, y, 4, 40); y += 1
-    fila("NETO",                f"${corte['neto']:,.2f}", C_CYAN() | curses.A_BOLD)
+    fila("NETO",                f"${corte['neto']:,.2f}", ACENTO() | curses.A_BOLD)
     y += 1
-    fila("fondo de caja",       f"${corte['fondo_caja']:,.2f}", C_NORM())
+    fila("fondo de caja",       f"${corte['fondo_caja']:,.2f}", TEXTO())
     fila("A ENTREGAR",          f"${corte['a_entregar']:,.2f}",
-         C_GREEN() | curses.A_BOLD if corte['a_entregar'] > 0 else C_NORM())
+         OK() | curses.A_BOLD if corte['a_entregar'] > 0 else TEXTO())
 
-    hline(stdscr, h - 3, 0, w)
-    sadd(stdscr, h - 2, 2, "[Enter] confirmar   [Esc] cancelar", C_NORM())
+    pie(stdscr, ("Enter", "confirmar"), ("Esc", "cancelar"))
     stdscr.refresh()
 
     while True:
@@ -762,7 +784,9 @@ def _texto_ticker_mayoreo() -> str:
     ordenados por prioridad (ya vienen así desde get_pedidos_mayoreo_pendientes)."""
     pedidos = get_pedidos_mayoreo_pendientes()
     if not pedidos:
-        return "  sin pedidos de mayoreo pendientes  »  "
+        # cadena vacía = no hay nada que desplazar. La cinta pone un aviso
+        # fijo en vez de repetir la misma frase dando vueltas.
+        return ""
 
     marcador = {"muy_alta": "●●●", "alta": "●●", "media": "●", "baja": "·"}
     partes = []
@@ -772,9 +796,44 @@ def _texto_ticker_mayoreo() -> str:
         partes.append(f"{m} {p['cliente_nombre']} — {p['kg']:.1f}kg — ${total:,.0f}")
     return "   »   ".join(partes) + "   »   "
 
+# ── CINTA DE MAYOREO ─────────────────────────────────────────────────────────
+
+ETIQUETA_TICKER = " MAYOREO "
+
+
+def draw_ticker(stdscr, ticker_offset: int = 0):
+    """
+    Cinta superior con los pedidos de mayoreo pendientes, desplazándose a lo
+    ancho de la pantalla.
+
+    Antes vivía en el hueco que sobraba a la derecha de la barra de estado, y
+    ese hueco se lo comían las cifras del turno: con un batch cargado el
+    ticker quedaba en 6 u 8 columnas, ilegible. Acá arriba tiene el ancho
+    completo y es lo primero que se ve al abrir el POS, que es lo que
+    corresponde a una cola de pedidos por surtir.
+    """
+    w = stdscr.getmaxyx()[1]
+    sadd(stdscr, 0, 0, " " * (w - 1), TAB())
+    sadd(stdscr, 0, 0, ETIQUETA_TICKER, WARN())
+
+    x = len(ETIQUETA_TICKER) + 1
+    ancho = w - x - 1
+    if ancho <= 0:
+        return
+
+    texto = _texto_ticker_mayoreo()
+    if not texto:
+        sadd(stdscr, 0, x, "cola despejada — sin pedidos pendientes", TAB())
+        return
+    # el texto se repite para que el scroll no muestre cortes al dar la vuelta
+    doble  = texto * (ancho // len(texto) + 3)
+    offset = ticker_offset % len(texto)
+    sadd(stdscr, 0, x, doble[offset: offset + ancho], TAB())
+
+
 # ── BARRA DE ESTADO ───────────────────────────────────────────────────────────
 
-def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = "", ticker_offset: int = 0):
+def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = ""):
     h, w = stdscr.getmaxyx()
     try:
         resumen = get_resumen_turno(sesion.batch_id)
@@ -787,23 +846,16 @@ def draw_statusbar(stdscr, sesion: SesionPOS, msg: str = "", ticker_offset: int 
     except Exception:
         status = f"  batch#{sesion.batch_id}  |  {fecha_hoy()}"
 
-    sadd(stdscr, h - 1, 0, " " * (w - 1), C_TAB())
-    sadd(stdscr, h - 1, 0, status[:w - 1], C_TAB())
+    sadd(stdscr, h - 1, 0, " " * (w - 1), TAB())
+    sadd(stdscr, h - 1, 0, status[:w - 1], TAB())
 
-    # ── ticker de mayoreo — pinta en el espacio libre a la derecha del status ──
-    ticker_x = len(status) + 3
-    if ticker_x < w - 5:
-        ancho_ticker = w - ticker_x - 1
-        texto = _texto_ticker_mayoreo()
-        # duplicar el texto para que el scroll se vea continuo (loop sin cortes)
-        doble = texto * (ancho_ticker // max(len(texto), 1) + 3)
-        offset = ticker_offset % len(texto) if texto else 0
-        visible = doble[offset: offset + ancho_ticker]
-        sadd(stdscr, h - 1, ticker_x, visible, C_TAB() | curses.A_BOLD)
-
+    # renglón de mensajes — propio, arriba de la barra de estado.
+    # Los mensajes de error del POS vienen prefijados con "!" desde
+    # _procesar_item(), así que el color se deduce de ahí.
+    sadd(stdscr, h - 2, 0, " " * (w - 1))
     if msg:
-        sadd(stdscr, h - 2, 0, " " * (w - 1))
-        sadd(stdscr, h - 2, 2, f" {msg[:w-6]} ", C_GREEN())
+        color = ALERTA() | curses.A_BOLD if msg.lstrip().startswith("!") else OK()
+        sadd(stdscr, h - 2, 2, f" {msg[:w - 6]} ", color)
 
 # ── HANDLER DINÁMICO POR tipo_venta ──────────────────────────────────────────
 
@@ -868,35 +920,75 @@ def _procesar_item(stdscr, sesion: SesionPOS, row, h: int, w: int) -> str:
 
 # ── LOOP PRINCIPAL ────────────────────────────────────────────────────────────
 
-def main(stdscr, batch_id: str, operador: str = "Luis"):
+def main(pantalla, batch_id: str, operador: str = "Luis"):
+    """
+    'pantalla' es la terminal real; 'stdscr' de aquí en adelante es el lienzo
+    de tamaño fijo centrado en ella. Todo el dibujo va contra el lienzo, así
+    que el layout mide siempre lo mismo sin importar el tamaño de la ventana.
+    """
     curses.curs_set(0)
-    stdscr.keypad(True)
     init_colors()
+    pantalla.keypad(True)
+    if not verificar_tamano(pantalla):
+        return
+
+    dims_term = pantalla.getmaxyx()
+    stdscr    = abrir_lienzo(pantalla)
+    stdscr.keypad(True)
     stdscr.timeout(150) # getch() regresa -1 si no hay tecla en 150ms - permite animar el ticker
+
     sesion = iniciar_pos(batch_id=batch_id, operador=operador)
-    msg    = f"BayoPOS iniciado — batch#{batch_id}"
+    msg    = f"terminal en línea · batch#{batch_id}"
     ticker_offset = 0
     while True:
+        # si el usuario redimensiona la terminal, el lienzo se recentra
+        if pantalla.getmaxyx() != dims_term:
+            dims_term = pantalla.getmaxyx()
+            stdscr    = abrir_lienzo(pantalla)
+            stdscr.keypad(True)
+            stdscr.timeout(150)
+
         h, w = stdscr.getmaxyx()
         stdscr.erase()
 
         # leer menú dinámico desde DB en cada frame
         menu = list(get_menu_pos())
 
-        # layout
-        ancho_izq = min(32, w // 3)
-        ancho_der = w - ancho_izq
-        win_izq   = stdscr.derwin(h - 1, ancho_izq, 0, 0)
-        win_der   = stdscr.derwin(h - 1, ancho_der, 0, ancho_izq)
+        # layout vertical, de arriba a abajo:
+        #   fila 0        cinta de mayoreo
+        #   1 .. h-3      paneles
+        #   h-2           renglón de mensajes
+        #   h-1           barra de estado
+        Y_PANELES    = 1
+        alto_paneles = h - 3
+
+        # los dos paneles comparten la columna del medio: el panel derecho
+        # arranca una columna antes y su borde izquierdo se dibuja encima del
+        # derecho del izquierdo, para que quede un solo trazo vertical
+        ancho_izq = min(ANCHO_PANEL_IZQ, w // 2)
+        x_union   = ancho_izq - 1
+        win_izq   = stdscr.derwin(alto_paneles, ancho_izq,   Y_PANELES, 0)
+        win_der   = stdscr.derwin(alto_paneles, w - x_union, Y_PANELES, x_union)
 
         # inventario para stock
         inv_raw  = get_estado_inventario()
         inv_dict = {r["sku"]: {"stock": r["stock"], "precio": r["precio_venta"]}
                     for r in inv_raw}
 
-        draw_panel_izq(win_izq, sesion, inv_dict, menu)
+        filas_div = draw_panel_izq(win_izq, sesion, inv_dict, menu)
         draw_panel_ticket(win_der, sesion)
-        draw_statusbar(stdscr, sesion, msg, ticker_offset)
+
+        # remates de la columna compartida: sin esto quedan dos esquinas
+        # encimadas arriba y abajo, y las divisiones del panel izquierdo
+        # terminan contra el borde del derecho en vez de empalmar con él.
+        # Las filas vienen en coordenadas del panel, así que llevan el offset.
+        sadd(stdscr, Y_PANELES,                    x_union, CAJA["T_ABAJO"],  ACENTO())
+        sadd(stdscr, Y_PANELES + alto_paneles - 1, x_union, CAJA["T_ARRIBA"], ACENTO())
+        for fila in filas_div:
+            sadd(stdscr, Y_PANELES + fila, x_union, CAJA["T_IZQ"], CHROME())
+
+        draw_ticker(stdscr, ticker_offset)
+        draw_statusbar(stdscr, sesion, msg)
         ticker_offset += 1
         stdscr.refresh()
         msg = ""
@@ -938,8 +1030,8 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
         # ── GASTO ─────────────────────────────────────────────────────
         elif key in (ord("g"), ord("G")):
             stdscr.erase()
-            sadd(stdscr, h // 2 - 3, w // 2 - 14, "REGISTRAR GASTO", C_TITLE())
-            sadd(stdscr, h // 2 - 2, w // 2 - 14, "[1]Gas [2]Leche [3]General", C_CYAN())
+            sadd(stdscr, h // 2 - 3, w // 2 - 14, "REGISTRAR GASTO", TITULO())
+            sadd(stdscr, h // 2 - 2, w // 2 - 14, "[1]Gas [2]Leche [3]General", ACENTO())
             stdscr.refresh()
             stdscr.timeout(-1)
             try:
@@ -956,13 +1048,19 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
                 except ErrorPOS as e:
                     msg = f"! {e}"
 
-        # ── ABRIR CUBETA ──────────────────────────────────────────────
-        elif key in (ord("a"), ord("A")):
+        # ── ABRIR CUBETA / LITREAR GRANEL ─────────────────────────────
+        # [A] rompe una cubeta sellada; [L] envasa de la que ya está abierta
+        elif key in (ord("a"), ord("A"), ord("l"), ord("L")):
+            desde_cubeta = key in (ord("a"), ord("A"))
+            pool  = get_pool_lt()
+            rotulo = "ABRIR CUBETA" if desde_cubeta else f"LITREAR GRANEL ({pool:.2f} lt)"
+            sadd(stdscr, h // 2 - 1, w // 2 - 16, rotulo, TITULO())
             e1  = pedir_int_modal(stdscr, "envases 1lt a cargar: ",  h // 2,     w // 2 - 16)
             e05 = pedir_int_modal(stdscr, "envases ½lt a cargar: ",  h // 2 + 1, w // 2 - 16)
             if e1 > 0 or e05 > 0:
                 try:
-                    r   = abrir_cubeta_pos(e1, e05)
+                    r   = (abrir_cubeta_pos(e1, e05) if desde_cubeta
+                           else litrear_pos(e1, e05))
                     msg = r["mensaje"]
                 except ErrorPOS as e:
                     msg = f"! {e}"
@@ -980,11 +1078,11 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
             def _submenu_mayoreo(stdscr):
                 h2, w2 = stdscr.getmaxyx()
                 stdscr.erase()
-                sadd(stdscr, h2 // 2 - 3, w2 // 2 - 16, "MENÚ MAYOREO", C_TITLE())
-                sadd(stdscr, h2 // 2 - 1, w2 // 2 - 16, "[1] nuevo cliente", C_CYAN())
-                sadd(stdscr, h2 // 2,     w2 // 2 - 16, "[2] capturar pedido", C_CYAN())
-                sadd(stdscr, h2 // 2 + 1, w2 // 2 - 16, "[3] status de pedidos", C_CYAN())
-                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[Esc] volver", C_NORM())
+                sadd(stdscr, h2 // 2 - 3, w2 // 2 - 16, "MENÚ MAYOREO", TITULO())
+                sadd(stdscr, h2 // 2 - 1, w2 // 2 - 16, "[1] nuevo cliente", ACENTO())
+                sadd(stdscr, h2 // 2,     w2 // 2 - 16, "[2] capturar pedido", ACENTO())
+                sadd(stdscr, h2 // 2 + 1, w2 // 2 - 16, "[3] status de pedidos", ACENTO())
+                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[Esc] volver", TEXTO())
                 stdscr.refresh()
                 sub_key = stdscr.getch()
                 if sub_key == ord("1"):
@@ -1007,12 +1105,16 @@ def main(stdscr, batch_id: str, operador: str = "Luis"):
         # ── SALIR ─────────────────────────────────────────────────────
         elif key in (ord("q"), ord("Q")):
             if sesion.ticket and not sesion.ticket.vacio():
-                msg = "! cierra el ticket antes de salir"
+                msg = "! ticket abierto — ciérralo antes de desacoplar"
             else:
                 break
 
 def iniciar_pos_tui(batch_id: str, operador: str = "Luis"):
-    curses.wrapper(main, batch_id, operador)
+    set_titulo_terminal(f"bayoSys · POS — batch#{batch_id}")
+    try:
+        curses.wrapper(main, batch_id, operador)
+    finally:
+        set_titulo_terminal()
 
 if __name__ == "__main__":
     iniciar_pos_tui(batch_id="test")
