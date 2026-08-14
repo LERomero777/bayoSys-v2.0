@@ -31,6 +31,7 @@ from pos_db import (
     get_pedidos_pendientes, get_pedidos_dia
 )
 from config import cargar_config, fecha_hoy
+from reportes import exportar_dia_seguro
 
 
 # ── TICKET EN CURSO ───────────────────────────────────────────────────────────
@@ -417,6 +418,13 @@ def hacer_corte(sesion: SesionPOS, nota: str = "") -> dict:
     corte = calcular_corte(batch_id=sesion.batch_id)
     corte_id = guardar_corte(sesion.batch_id, corte, nota)
     corte["corte_id"] = corte_id
+
+    # Respaldo en Excel del día que se acaba de cortar. Va DESPUÉS de que el
+    # corte ya quedó guardado y no puede tumbarlo: exportar_dia_seguro() no
+    # lanza nunca y devuelve None si algo falló. Un Excel que no salió se
+    # regenera a mano desde [4] análisis → exportar; un corte perdido por
+    # una excepción del exportador, no.
+    corte["export_xlsx"] = exportar_dia_seguro()
     return corte
 
 

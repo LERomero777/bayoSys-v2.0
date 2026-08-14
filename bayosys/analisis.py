@@ -289,6 +289,61 @@ def mostrar_proveedores(n_dias: int = 90):
 
 # ── MENÚ ─────────────────────────────────────────────────────────────────────
 
+def _exportar_excel():
+    """
+    Exportación manual a Excel. Los atajos de arriba cubren lo que se pide
+    casi siempre; el rango libre está para lo demás (un corte de mes, una
+    aclaración con un cliente). Toda la escritura vive en reportes.py.
+    """
+    from datetime import date, timedelta
+    from reportes import ErrorReporte, exportar_rango
+
+    hoy = date.today()
+
+    imprimir("\n")
+    imprimir(titulo_txt("EXPORTAR A EXCEL"))
+    imprimir(opcion_txt("1", "hoy"))
+    imprimir(opcion_txt("2", "últimos 7 días"))
+    imprimir(opcion_txt("3", "mes actual"))
+    imprimir(opcion_txt("4", "rango personalizado"))
+    imprimir(opcion_txt("5", "cancelar"))
+
+    op = pedir("\n  opción: ").strip()
+
+    if op == "1":
+        desde = hasta = hoy.isoformat()
+    elif op == "2":
+        desde = (hoy - timedelta(days=6)).isoformat()
+        hasta = hoy.isoformat()
+    elif op == "3":
+        desde = hoy.replace(day=1).isoformat()
+        hasta = hoy.isoformat()
+    elif op == "4":
+        imprimir("\n  formato AAAA-MM-DD — Enter en blanco cancela")
+        desde = pedir("  desde: ").strip()
+        if not desde:
+            return
+        hasta = pedir("  hasta: ").strip()
+        if not hasta:
+            return
+    elif op == "5":
+        return
+    else:
+        imprimir(alerta_txt("opción inválida"))
+        return
+
+    try:
+        ruta = exportar_rango(desde, hasta)
+    except ErrorReporte as e:
+        # Falla esperable: fecha mal escrita, archivo abierto en Excel,
+        # openpyxl sin instalar. El mensaje ya viene explicado.
+        imprimir("\n" + alerta_txt(str(e)))
+    else:
+        imprimir("\n" + ok_txt("exportado"))
+        imprimir(f"  {ruta}")
+    pedir("\n  Enter para continuar...")
+
+
 def menu_analisis():
     while True:
         imprimir("\n")
@@ -297,7 +352,8 @@ def menu_analisis():
         imprimir(opcion_txt("2", "resumen de otro día"))
         imprimir(opcion_txt("3", "histórico (últimos 7 días)"))
         imprimir(opcion_txt("4", "comparativo de proveedores"))
-        imprimir(opcion_txt("5", "volver al menú principal"))
+        imprimir(opcion_txt("5", "exportar a Excel"))
+        imprimir(opcion_txt("6", "volver al menú principal"))
 
         op = pedir("\n  opción: ").strip()
 
@@ -329,6 +385,9 @@ def menu_analisis():
             mostrar_proveedores()
 
         elif op == "5":
+            _exportar_excel()
+
+        elif op == "6":
             break
 
         else:

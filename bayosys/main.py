@@ -29,6 +29,7 @@ from cierre import menu_cierre, cargar_cierre
 from analisis import menu_analisis
 from tui import iniciar_tui
 from pos_db import init_db, calcular_corte, guardar_corte
+from reportes import exportar_dia_seguro
 from guardian import verificar_integridad
 from nuke import factory_reset
 
@@ -194,7 +195,15 @@ def hacer_corte_entre_batches(batch_id: str):
     imprimir()
     if _confirmar("  ¿confirmar corte?"):
         corte_id = guardar_corte(batch_id, corte)
-        imprimir(f"\n{ok_txt(f'corte #{corte_id} guardado')}\n")
+        imprimir(f"\n{ok_txt(f'corte #{corte_id} guardado')}")
+        # El corte ya está guardado; el Excel es respaldo y no puede
+        # tumbarlo — exportar_dia_seguro() no lanza. Si no salió, se avisa
+        # y se regenera a mano desde [4] análisis → exportar a Excel.
+        ruta = exportar_dia_seguro()
+        if ruta:
+            imprimir(f"{ok_txt('respaldo Excel')}  {ruta}\n")
+        else:
+            imprimir(f"{alerta_txt('no se pudo generar el Excel — el corte SÍ quedó guardado')}\n")
         return True
     else:
         imprimir(f"\n{alerta_txt('corte no confirmado — las ventas siguen en el sistema')}\n")

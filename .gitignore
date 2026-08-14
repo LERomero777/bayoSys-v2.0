@@ -1,4 +1,5 @@
 data/
+exportes/
 __pycache__/
 *.pyc
 *.pyo

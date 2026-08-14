@@ -457,6 +457,20 @@ def get_movimientos(sku: str = None, fecha: str = None, limit: int = 50) -> list
     with conectar() as conn:
         return conn.execute(sql, params).fetchall()
 
+def get_movimientos_rango(desde: str, hasta: str) -> list:
+    """
+    Movimientos de inventario entre dos fechas, ambas inclusive.
+    Orden cronológico — al revés que get_movimientos(), que va del más
+    reciente hacia atrás porque alimenta una pantalla de consulta rápida.
+    Sin límite de filas: esto alimenta el exportador, no una pantalla.
+    """
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT * FROM movimientos_inv
+            WHERE fecha BETWEEN ? AND ?
+            ORDER BY fecha, id
+        """, (desde, hasta)).fetchall()
+
 
 # ── TICKETS ───────────────────────────────────────────────────────────────────
 
@@ -547,6 +561,45 @@ def get_tickets_dia(fecha: str = None) -> list:
             ORDER BY id
         """, (fecha,)).fetchall()
 
+def get_tickets_rango(desde: str, hasta: str) -> list:
+    """
+    Ventas entre dos fechas, ambas inclusive, YA cruzadas con sus líneas.
+
+    Devuelve UNA fila por línea de ticket, con los datos de cabecera del
+    ticket repetidos en cada una. Se resuelve en una sola consulta con JOIN
+    en vez de pedir los items ticket por ticket — un rango de un mes son
+    cientos de tickets, y el patrón N+1 haría cientos de consultas.
+
+    Los pagos y el total viven en la cabecera, así que al sumar columnas de
+    un reporte hay que sumar 'subtotal' (por línea), NO 'total_ticket', que
+    se repite en cada línea del mismo ticket.
+
+    LEFT JOIN a propósito: un ticket sin líneas es un dato roto, pero si
+    existe queremos verlo en el reporte, no que desaparezca.
+    """
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT t.id            AS ticket_id,
+                   t.fecha         AS fecha,
+                   t.hora          AS hora,
+                   t.batch_id      AS batch_id,
+                   t.operador      AS operador,
+                   t.pago_efectivo AS pago_efectivo,
+                   t.pago_transfer AS pago_transfer,
+                   t.pago_tarjeta  AS pago_tarjeta,
+                   t.total         AS total_ticket,
+                   t.cambio        AS cambio,
+                   ti.sku          AS sku,
+                   ti.descripcion  AS descripcion,
+                   ti.cantidad     AS cantidad,
+                   ti.precio_unit  AS precio_unit,
+                   ti.subtotal     AS subtotal
+            FROM tickets t
+            LEFT JOIN ticket_items ti ON ti.ticket_id = t.id
+            WHERE t.fecha BETWEEN ? AND ? AND t.anulado = 0
+            ORDER BY t.fecha, t.id, ti.id
+        """, (desde, hasta)).fetchall()
+
 def get_ticket_items(ticket_id: int) -> list:
     with conectar() as conn:
         return conn.execute(
@@ -580,6 +633,15 @@ def get_gastos_dia(fecha: str = None) -> list:
         return conn.execute(
             "SELECT * FROM gastos WHERE fecha = ? ORDER BY id", (fecha,)
         ).fetchall()
+
+def get_gastos_rango(desde: str, hasta: str) -> list:
+    """Gastos entre dos fechas, ambas inclusive, en orden cronológico."""
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT * FROM gastos
+            WHERE fecha BETWEEN ? AND ?
+            ORDER BY fecha, id
+        """, (desde, hasta)).fetchall()
 
 def get_gastos_batch(batch_id: str) -> list:
     with conectar() as conn:
@@ -666,6 +728,50 @@ def get_cortes(fecha: str = None) -> list:
         return conn.execute(
             "SELECT * FROM cortes WHERE fecha = ? ORDER BY id", (fecha,)
         ).fetchall()
+
+def get_cortes_rango(desde: str, hasta: str) -> list:
+    """
+    Cortes de caja entre dos fechas, ambas inclusive.
+
+    Un corte tiene DOS fechas y no siempre coinciden:
+
+      cortes.fecha  es cuándo se guardó — guardar_corte() la sella con el
+                    reloj del momento.
+      batch_id      trae el día de operación al que pertenece el corte,
+                    codificado en su formato AAAAMMDD-N.
+
+    Se separan en dos casos que pasan de verdad: un corte hecho pasada la
+    medianoche queda fechado al día siguiente, y un corte atrasado que
+    rescata el guardian queda fechado el día en que el operador se puso al
+    corriente. Filtrar solo por cortes.fecha dejaría el reporte de ese día
+    con sus ventas y gastos pero sin su corte.
+
+    Por eso el filtro acepta cualquiera de las dos, y el día de operación
+    sale calculado como columna 'dia_operacion' para que en el reporte se
+    vea a qué día corresponde de verdad cada renglón.
+
+    Esto NO corrige el dato guardado — es solo lectura. Sellar bien la
+    fecha desde el principio es cambiar guardar_corte(), que escribe.
+    """
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT * FROM (
+                SELECT *,
+                       CASE
+                         WHEN batch_id IS NOT NULL
+                          AND substr(batch_id, 1, 8) GLOB
+                              '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+                         THEN substr(batch_id, 1, 4) || '-' ||
+                              substr(batch_id, 5, 2) || '-' ||
+                              substr(batch_id, 7, 2)
+                         ELSE fecha
+                       END AS dia_operacion
+                FROM cortes
+            )
+            WHERE dia_operacion BETWEEN ? AND ?
+               OR fecha         BETWEEN ? AND ?
+            ORDER BY dia_operacion, id
+        """, (desde, hasta, desde, hasta)).fetchall()
 
 def tiene_corte_guardado(batch_id: str) -> bool:
     """
@@ -777,6 +883,23 @@ def get_pool_historial(limit: int = 30) -> list:
         return conn.execute(
             "SELECT * FROM manteca_pool ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
+
+
+def get_pool_historial_rango(desde: str, hasta: str) -> list:
+    """
+    Ledger del pool entre dos fechas, ambas inclusive, en orden cronológico.
+
+    A diferencia de get_pool_historial(), que va del más reciente hacia atrás
+    con límite de filas porque alimenta una pantalla, aquí el orden ascendente
+    es el que importa: lt_saldo es el saldo DESPUÉS de cada movimiento, así que
+    leído de viejo a nuevo el ledger se explica solo.
+    """
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT * FROM manteca_pool
+            WHERE fecha BETWEEN ? AND ?
+            ORDER BY fecha, id
+        """, (desde, hasta)).fetchall()
 
 
 def cargar_produccion_batch(batch_id: str, kg_chi: float,
@@ -1104,6 +1227,28 @@ def get_pedidos_dia(fecha_pedido: str = None) -> list:
             WHERE p.fecha_pedido = ?
             ORDER BY p.id
         """, (fecha_pedido,)).fetchall()
+
+def get_pedidos_rango(desde: str, hasta: str) -> list:
+    """
+    Pedidos de mayoreo TOMADOS entre dos fechas, ambas inclusive.
+
+    Filtra por fecha_pedido — cuándo se generó el compromiso — no por
+    fecha_entrega. Es decisión de negocio, no detalle técnico: el reporte
+    responde "qué pedidos entraron en este periodo", que es la lectura
+    comercial. Un pedido tomado el 3 y entregado el 20 cae en el rango del
+    3, no en el del 20. fecha_entrega va igual en el reporte como columna,
+    así que el vencimiento sigue siendo visible aunque no sea el filtro.
+
+    Mismo criterio que get_pedidos_dia(), su equivalente de un solo día.
+    """
+    with conectar() as conn:
+        return conn.execute("""
+            SELECT p.*, c.nombre as cliente_nombre
+            FROM pedidos_mayoreo p
+            JOIN clientes_mayoreo c ON p.cliente_clave = c.clave
+            WHERE p.fecha_pedido BETWEEN ? AND ?
+            ORDER BY p.fecha_pedido, p.id
+        """, (desde, hasta)).fetchall()
 
 
 # ── INIT AUTOMÁTICO ───────────────────────────────────────────────────────────
