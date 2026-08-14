@@ -107,6 +107,26 @@ def cargar_batches(fecha: str) -> List[Batch]:
         return []
 
 
+def cargar_batches_rango(desde: str, hasta: str) -> List[Batch]:
+    """
+    Carga todos los batches entre dos fechas, ambas inclusive.
+
+    La producción vive en un JSON por día, no en SQLite, así que no hay una
+    sola operación que traiga el rango: se resuelve día por día reusando
+    cargar_batches(). No itera sobre el calendario sino sobre los días que
+    de verdad tienen archivo, así que un rango de un año no cuesta 365
+    revisiones de disco — cuesta tantas como días trabajados haya dentro.
+
+    Cada Batch ya trae su propia fecha, así que la lista plana no pierde
+    información al mezclar días.
+    """
+    fechas = [f for f in fechas_con_registro() if desde <= f <= hasta]
+    batches: List[Batch] = []
+    for fecha in sorted(fechas):
+        batches.extend(cargar_batches(fecha))
+    return batches
+
+
 def guardar_batch(batch: Batch):
     """
     Agrega un batch al archivo del día correspondiente.
