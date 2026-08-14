@@ -128,7 +128,13 @@ COLS_GASTOS = [
 ]
 
 COLS_CORTES = [
-    ("Fecha",        "fecha",           FMT_TEXTO,  False),
+    # 'Día operación' y 'Guardado' pueden no coincidir: un corte hecho
+    # pasada la medianoche, o uno atrasado que rescató el guardian, se
+    # guarda con fecha posterior al día que cierra. Van las dos columnas
+    # para que un corte fechado fuera del rango pedido se explique solo
+    # en vez de parecer un error del reporte.
+    ("Día operación", "dia_operacion",  FMT_TEXTO,  False),
+    ("Guardado",      "fecha",          FMT_TEXTO,  False),
     ("Hora",         "hora",            FMT_TEXTO,  False),
     ("Batch",        "batch_id",        FMT_TEXTO,  False),
     ("Efectivo",     "ventas_efectivo", FMT_DINERO, True),
