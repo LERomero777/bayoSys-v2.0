@@ -362,6 +362,137 @@ def draw_panel_ticket(win, sesion: SesionPOS):
     sadd(win, h - 2, 3, "[X] quitar item   [P] cobrar   [Esc] limpiar", CHROME())
 
 
+# ── COBRO EN EFECTIVO ─────────────────────────────────────────────────────────
+
+# Medio centavo. Comparar efectivo contra total con `<` desnudo rechaza cobros
+# legítimos cuando el total trae cola binaria; con este margen, una diferencia
+# de 1e-14 nunca puede leerse como faltante. Es tolerancia de comparación, no
+# de cobro: 10 centavos de menos siguen siendo insuficientes.
+TOLERANCIA_CENTAVO = 0.005
+
+# Billetes que de verdad circulan en el mostrador. Las monedas fraccionarias
+# quedan fuera a propósito: en Hermosillo la de 5 centavos ya no circula y la
+# de 10 casi no aparece en caja.
+DENOMINACIONES = ((ord("1"), 50), (ord("2"), 100),
+                  (ord("3"), 200), (ord("4"), 500))
+
+try:
+    from pos import total_a_cobrar_efectivo
+except ImportError:
+    # TODO(Luis) — §5.C.2. La política de redondeo va en pos.py, con la
+    # constante REDONDEO_EFECTIVO en config.py. Este stub deja la pantalla
+    # funcionando idéntica a hoy (cobra el total al centavo) y la conecta
+    # sola en cuanto exista la función real.
+    #
+    #     def total_a_cobrar_efectivo(total: float) -> float:
+    #         """Redondea al múltiplo configurado. NO altera el total."""
+    #
+    # Se redondea el COBRO, nunca la venta registrada: si se redondea la
+    # venta, el histórico de precios se degrada y analisis.py empieza a
+    # producir márgenes falsos.
+    def total_a_cobrar_efectivo(total: float) -> float:
+        return total
+
+
+def _pantalla_efectivo(stdscr, total: float, my: int, mx: int) -> float:
+    """
+    Captura del efectivo recibido. Retorna lo que entregó el cliente,
+    o 0.0 si se canceló.
+
+    Muestra los tres números que el operador necesita —total, importe a
+    cobrar y cambio— sin ajustes silenciosos: si el importe a cobrar difiere
+    del total, la línea de redondeo aparece etiquetada.
+    """
+    a_cobrar   = round(total_a_cobrar_efectivo(total), 2)
+    diferencia = round(a_cobrar - total, 2)
+    recibido   = 0.0
+
+    ANCHO = 40
+    ALTO  = 17
+
+    while True:
+        for i in range(ALTO):
+            sadd(stdscr, my + i, mx, " " * (ANCHO + 1))
+        caja(stdscr, my, mx + 1, ALTO, ANCHO, "efectivo")
+
+        y = my + 2
+        sadd(stdscr, y, mx + 3,  "total del ticket", CHROME())
+        sadd(stdscr, y, mx + 25, f"${total:>12,.2f}", TEXTO())
+
+        # El redondeo solo se anuncia cuando existe. Una línea de "+0.00"
+        # permanente sería ruido que el operador aprende a ignorar.
+        if abs(diferencia) >= 0.005:
+            y += 1
+            etiqueta = "redondeo" if diferencia < 0 else "redondeo (+)"
+            sadd(stdscr, y, mx + 3,  etiqueta, AVISO())
+            sadd(stdscr, y, mx + 25, f"${diferencia:>+12,.2f}", AVISO())
+
+        y += 1
+        sadd(stdscr, y, mx + 3,  "A COBRAR", ACENTO() | curses.A_BOLD)
+        sadd(stdscr, y, mx + 25, f"${a_cobrar:>12,.2f}", OK() | curses.A_BOLD)
+
+        divisor(stdscr, my + 5, mx + 1, ANCHO, pesado=False)
+
+        sadd(stdscr, my + 6, mx + 3, "recibido", CHROME())
+        sadd(stdscr, my + 6, mx + 25, f"${recibido:>12,.2f}", DATO() | curses.A_BOLD)
+
+        # El cambio es lo que el operador busca de un vistazo: va en su propia
+        # caja y en video inverso, el tratamiento más prominente disponible.
+        falta  = round(a_cobrar - recibido, 2)
+        cambio = round(recibido - a_cobrar, 2)
+        caja(stdscr, my + 7, mx + 1, 3, ANCHO, "cambio")
+        if recibido <= 0:
+            sadd(stdscr, my + 8, mx + 3, f"{'—':^{ANCHO-4}}", CHROME())
+        elif falta > TOLERANCIA_CENTAVO:
+            sadd(stdscr, my + 8, mx + 3,
+                 f"{('FALTAN $' + format(falta, ',.2f')):^{ANCHO-4}}",
+                 WARN() | curses.A_BOLD)
+        else:
+            sadd(stdscr, my + 8, mx + 3,
+                 f"{('$' + format(cambio, ',.2f')):^{ANCHO-4}}",
+                 BOTON() | curses.A_BOLD)
+
+        fila = my + 11
+        sadd(stdscr, fila, mx + 3, "[1] 50   [2] 100   [3] 200   [4] 500", ACENTO())
+        sadd(stdscr, fila + 1, mx + 3, "[E] exacto   [M] otro monto   [C] limpiar",
+             ACENTO())
+        sadd(stdscr, fila + 3, mx + 3, "[Enter] cobrar      [Esc] cancelar", TEXTO())
+        stdscr.refresh()
+
+        key = stdscr.getch()
+
+        if key == 27:
+            return 0.0
+
+        elif key in dict(DENOMINACIONES):
+            # se acumulan: dos toques a [2] son 200
+            recibido = round(recibido + dict(DENOMINACIONES)[key], 2)
+
+        elif key in (ord("e"), ord("E")):
+            recibido = a_cobrar          # pago justo, cambio cero
+
+        elif key in (ord("c"), ord("C")):
+            recibido = 0.0
+
+        elif key in (ord("m"), ord("M")):
+            libre = pedir_float_modal(stdscr, "  monto $", my + ALTO - 2, mx + 2)
+            if libre > 0:
+                recibido = round(recibido + libre, 2)
+
+        elif key in (10, 13):
+            if recibido <= 0:
+                continue
+            # Único motivo válido para rechazar: el dinero no alcanza de
+            # verdad. Nunca por una diferencia en el decimocuarto decimal.
+            if recibido < a_cobrar - TOLERANCIA_CENTAVO:
+                sadd(stdscr, my + ALTO - 2, mx + 3,
+                     f"  faltan ${a_cobrar - recibido:,.2f}  ", ALERTA() | curses.A_BOLD)
+                stdscr.refresh()
+                curses.napms(1200)
+                continue
+            return recibido
+
+
 # ── FLUJO COBRO ───────────────────────────────────────────────────────────────
 
 def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
@@ -415,13 +546,31 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
             break
 
     # paso 2: ingresar monto
-    _dibujar_caja()
-    monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
+    if metodo1 == "efectivo":
+        # El efectivo tiene su propia pantalla: es el único método con
+        # problema físico de cambio. Terminal y transferencia se cobran al
+        # centavo exacto y siguen por el camino de siempre.
+        monto1 = _pantalla_efectivo(stdscr, total, my, mx)
+    else:
+        _dibujar_caja()
+        monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
     if monto1 <= 0:
         return ""
 
     pagos[metodo1] = monto1
     restante = round(total - monto1, 2)
+
+    if metodo1 == "efectivo":
+        _dibujar_caja()   # la pantalla de efectivo dibujó lo suyo encima
+
+    # TODO(Luis) — §5.C.3. Cuando total_a_cobrar_efectivo() empiece a
+    # redondear hacia abajo, el efectivo recibido puede ser menor al total
+    # del ticket y este `restante` va a pedir un segundo método por una
+    # diferencia que en realidad ya se perdonó. Falta que cobrar() (pos.py)
+    # reciba el importe redondeado y guarde la diferencia en la columna
+    # tickets.diferencia_redondeo — la migración ya está puesta en pos_db.py.
+    # Sin ese renglón el corte no cuadra: el efectivo esperado pasa a ser
+    # ventas en efectivo + redondeo acumulado − gastos.
 
     # paso 3: ¿cubre?
     if restante <= 0:
