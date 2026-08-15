@@ -268,6 +268,74 @@ def _migrar_schema(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _columnas(conn: sqlite3.Connection, tabla: str) -> set:
+    """
+    Nombres de columna de una tabla. SQLite no soporta
+    ADD COLUMN IF NOT EXISTS, así que hay que preguntar antes de cada ALTER
+    o la segunda corrida truena con 'duplicate column name'.
+    """
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({tabla})").fetchall()}
+
+
+def _migrar_pedidos_mayoreo(conn: sqlite3.Connection):
+    """
+    Cierra el agujero del despacho de mayoreo.
+
+    Hasta ahora, entregar un pedido solo prendía el flag 'entregado': apagaba
+    el ticker pero no dejaba rastro de cuándo salió, cuántos kilos salieron de
+    verdad ni qué ticket cobró el dinero.
+
+    Las tres columnas van nullable a propósito. Los pedidos que ya estaban
+    entregados antes de esta migración no tienen esa información y no hay de
+    dónde inventarla: NULL significa "se despachó antes de que existiera el
+    registro", que no es lo mismo que un 0.
+
+    'entregado' se conserva tal cual — sigue siendo el flag que filtra el
+    ticker. No se convierte en 'estado TEXT': cancelados y entregas parciales
+    están fuera de alcance.
+
+    Idempotente. Se puede correr N veces.
+    """
+    existentes = _columnas(conn, "pedidos_mayoreo")
+
+    migraciones = [
+        # OJO: fecha_entrega_real es el evento. La columna vieja 'fecha_entrega'
+        # es la promesa que se le hizo al cliente, editable y a futuro. Para
+        # atribuir una venta a un día se usa esta, nunca aquella.
+        ("fecha_entrega_real", "TEXT"),
+        ("kg_real",            "REAL"),
+        ("ticket_id",          "INTEGER"),
+    ]
+
+    for col, definicion in migraciones:
+        if col not in existentes:
+            conn.execute(f"ALTER TABLE pedidos_mayoreo ADD COLUMN {col} {definicion}")
+
+    conn.commit()
+
+
+def _migrar_tickets_redondeo(conn: sqlite3.Connection):
+    """
+    Guarda cuánto se perdonó (o se cobró de más) al redondear el efectivo.
+
+    Sin esta columna el conteo físico de billetes nunca cuadra contra las
+    ventas del turno: cada ticket redondeado deja unos centavos que aparecen
+    como faltante sin explicación. Con ~100 tickets al día son decenas de
+    pesos diarios de descuadre.
+
+    NOT NULL DEFAULT 0 y no nullable: los tickets viejos se cobraron al
+    centavo exacto, así que su diferencia de redondeo es cero de verdad —
+    no es un dato ausente.
+
+    Idempotente.
+    """
+    if "diferencia_redondeo" not in _columnas(conn, "tickets"):
+        conn.execute(
+            "ALTER TABLE tickets ADD COLUMN diferencia_redondeo REAL NOT NULL DEFAULT 0"
+        )
+    conn.commit()
+
+
 # ── INIT ─────────────────────────────────────────────────────────────────────
 
 def init_db():
@@ -278,6 +346,8 @@ def init_db():
     with conectar() as conn:
         conn.executescript(SCHEMA)
         _migrar_schema(conn)
+        _migrar_pedidos_mayoreo(conn)
+        _migrar_tickets_redondeo(conn)
 
         for sku, desc, stock, unidad, precio, tipo, origen, es_menu, orden, var in SKUs_DEFAULT:
             conn.execute("""
@@ -1069,11 +1139,38 @@ def editar_pedido_mayoreo(pedido_id: int, kg: float = None,
         conn.execute(f"UPDATE pedidos_mayoreo SET {sets} WHERE id = ?", vals)
         conn.commit()
 
-def marcar_pedido_entregado(pedido_id: int):
+def get_pedido_mayoreo(pedido_id: int):
+    """
+    Un pedido individual con el nombre del cliente resuelto.
+    Retorna None si no existe. Solo lectura.
+    """
     with conectar() as conn:
-        conn.execute(
-            "UPDATE pedidos_mayoreo SET entregado = 1 WHERE id = ?", (pedido_id,)
-        )
+        return conn.execute("""
+            SELECT p.*, c.nombre as cliente_nombre
+            FROM pedidos_mayoreo p
+            JOIN clientes_mayoreo c ON p.cliente_clave = c.clave
+            WHERE p.id = ?
+        """, (pedido_id,)).fetchone()
+
+def marcar_pedido_entregado(pedido_id: int, kg_real: float,
+                            ticket_id: int, fecha_entrega_real: str):
+    """
+    Cierra el pedido: lo saca del ticker y deja el rastro del despacho —
+    kilos reales sobre la báscula, ticket que cobró y día en que salió.
+
+    SQL puro y sin validaciones a propósito. Que el pedido exista, que siga
+    pendiente y que los kilos sean plausibles se verifica en pos.py, antes
+    de cobrar. Aquí ya se cobró: esto solo escribe.
+    """
+    with conectar() as conn:
+        conn.execute("""
+            UPDATE pedidos_mayoreo
+            SET entregado          = 1,
+                kg_real            = ?,
+                ticket_id          = ?,
+                fecha_entrega_real = ?
+            WHERE id = ?
+        """, (kg_real, ticket_id, fecha_entrega_real, pedido_id))
         conn.commit()
 
 def get_pedidos_pendientes() -> list:

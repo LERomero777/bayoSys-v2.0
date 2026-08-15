@@ -729,6 +729,207 @@ def flujo_capturar_pedido_mayoreo(stdscr) -> str:
     except ErrorPOS as e:
         return f"! {e}"
 
+
+# ── DESPACHO DE PEDIDOS DE MAYOREO ────────────────────────────────────────────
+
+# Tercera copia de la misma señal — main.py:62 y registro.py:25 ya la traen.
+# Sigue pendiente el refactor de extraerla a un módulo compartido; repetir la
+# convención existente es menos daño que inventar una cuarta aquí.
+class _Cancelado(Exception):
+    """Señal interna — el operador abortó el despacho a la mitad."""
+    pass
+
+
+# Qué tanto puede alejarse el kilaje real de lo pactado antes de pedir
+# confirmación. Una diferencia grande casi siempre es un dedazo en la báscula,
+# no una renegociación — pero renegociar es legítimo, así que se pregunta en
+# vez de bloquear.
+TOLERANCIA_KG_PEDIDO = 0.15
+
+
+def _pedir_kg_reales(stdscr, kg_pedidos: float, y: int, x: int) -> float:
+    """
+    Kilos que de verdad salieron. Enter vacío o 0 aborta el despacho.
+    Los kg pedidos quedan a la vista como referencia mientras se teclea.
+    """
+    sadd(stdscr, y, x, f"kg pedidos: {kg_pedidos:.1f}", DATO())
+    kg_real = pedir_float_modal(stdscr, "kg reales:  ", y + 1, x)
+    if kg_real <= 0:
+        raise _Cancelado()
+    return kg_real
+
+
+def _confirmar_diferencia_kg(stdscr, kg_pedidos: float, kg_real: float,
+                             y: int, x: int) -> None:
+    """
+    Freno de plausibilidad física. No decide nada: solo obliga a mirar el
+    número cuando se sale del rango esperado.
+    """
+    if kg_pedidos <= 0:
+        return
+    desvio = abs(kg_real - kg_pedidos) / kg_pedidos
+    if desvio <= TOLERANCIA_KG_PEDIDO:
+        return
+
+    signo = "más" if kg_real > kg_pedidos else "menos"
+    sadd(stdscr, y, x,
+         f"  ! {kg_real:.1f}kg es {desvio*100:.0f}% {signo} que lo pactado  ", WARN())
+    sadd(stdscr, y + 1, x, "  ¿la báscula dice eso?  ", ALERTA())
+    pie(stdscr, ("Enter", "sí, despachar"), ("Esc", "corregir"))
+    stdscr.refresh()
+    if not _esperar_confirmacion(stdscr):
+        raise _Cancelado()
+
+
+def flujo_entregar_pedido_mayoreo(stdscr) -> str:
+    """
+    Despacha un pedido pendiente: kilos reales sobre la báscula, cobro al
+    precio pactado en el pedido y cierre de su ciclo de vida.
+
+    El stock se descuenta aquí y no al capturar el pedido: la cantidad se
+    negocia físicamente frente al cliente, y hasta este momento no hay kilos
+    reales que descontar.
+    """
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    pedidos = get_pedidos_mayoreo_pendientes()
+
+    if not pedidos:
+        sadd(stdscr, h // 2, w // 2 - 20,
+             "  no hay pedidos pendientes de entrega  ", AVISO())
+        stdscr.refresh()
+        stdscr.getch()
+        return ""
+
+    encabezado(stdscr, "entregar pedido", "mayoreo")
+    marcador = {"muy_alta": "●●●", "alta": "●●", "media": "●", "baja": "·"}
+
+    visibles = pedidos[:9]
+    for i, p in enumerate(visibles):
+        total = p["kg"] * p["precio_kg_pactado"]
+        sadd(stdscr, 3 + i, 2, f"[{i+1}]", ACENTO() | curses.A_BOLD)
+        sadd(stdscr, 3 + i, 6, f"{marcador.get(p['prioridad'], ''):<3}", AVISO())
+        sadd(stdscr, 3 + i, 10, f"{p['cliente_nombre']:<18}", TEXTO())
+        sadd(stdscr, 3 + i, 29, f"{p['kg']:>6.1f}kg", DATO())
+        sadd(stdscr, 3 + i, 39, f"${p['precio_kg_pactado']:>6.0f}/kg", DATO())
+        sadd(stdscr, 3 + i, 52, f"${total:>9,.0f}", OK())
+        sadd(stdscr, 3 + i, 64, f"prometido {p['fecha_entrega']}", CHROME())
+
+    pie(stdscr, ("1-9", "elegir pedido"), ("0/Esc", "cancelar"))
+    stdscr.refresh()
+
+    try:
+        idx = _tecla_a_idx(stdscr.getch())
+        if not (0 <= idx < len(visibles)):
+            raise _Cancelado()
+        pedido = visibles[idx]
+
+        my = 3 + len(visibles) + 1
+        kg_real = _pedir_kg_reales(stdscr, pedido["kg"], my, 2)
+        _confirmar_diferencia_kg(stdscr, pedido["kg"], kg_real, my + 3, 2)
+
+        # El precio es el que se pactó en el pedido, no el del día: el
+        # cliente cerró un trato y el tabulador pudo moverse desde entonces.
+        total = kg_real * pedido["precio_kg_pactado"]
+
+        stdscr.erase()
+        encabezado(stdscr, "confirmar entrega", "mayoreo")
+        cy = 3
+        sadd(stdscr, cy,     2, f"cliente      {pedido['cliente_nombre']}", TEXTO())
+        sadd(stdscr, cy + 1, 2, f"pactado      {pedido['kg']:.1f}kg "
+                                f"a ${pedido['precio_kg_pactado']:,.2f}/kg", TEXTO())
+        sadd(stdscr, cy + 2, 2, f"despacha     {kg_real:.1f}kg", DATO() | curses.A_BOLD)
+        divisor(stdscr, cy + 3, 2, 46, pesado=False)
+        sadd(stdscr, cy + 4, 2, "TOTAL A COBRAR", TITULO())
+        sadd(stdscr, cy + 4, 20, f"${total:,.2f}", OK() | curses.A_BOLD)
+
+        pie(stdscr, ("Enter", "cobrar y entregar"), ("Esc", "cancelar"))
+        stdscr.refresh()
+        if not _esperar_confirmacion(stdscr):
+            raise _Cancelado()
+
+    except _Cancelado:
+        return ""
+
+    # TODO(Luis) — pos.py:544. entregar_pedido_mayoreo() todavía tiene la
+    # firma vieja (pedido_id) y solo prende el flag: no cobra, no descuenta
+    # stock y llama a marcar_pedido_entregado() con un solo argumento, que
+    # ya no existe. La reescritura es capa de lógica (§4.B.3) y va en este
+    # orden estricto:
+    #     1. leer el pedido y verificar que entregado == 0
+    #     2. validar kg_real <= stock CHI disponible
+    #     3. armar y cobrar el ticket a precio_kg_pactado
+    #     4. SOLO si el cobro tuvo éxito → marcar_pedido_entregado(
+    #            pedido_id, kg_real, ticket_id, fecha_entrega_real)
+    # Marcar antes de cobrar produce pedidos fantasma: entregados en el
+    # registro, invisibles en la caja.
+    # Esta pantalla ya la llama con la firma final. Mientras no exista, el
+    # TypeError se atrapa abajo y el pedido se queda pendiente — que es
+    # exactamente lo que debe pasar si el cobro no ocurrió.
+    try:
+        r = entregar_pedido_mayoreo(pedido["id"], kg_real)
+    except TypeError:
+        return ("! despacho no disponible — falta reescribir "
+                "entregar_pedido_mayoreo (pos.py:544)")
+    except ErrorPOS as e:
+        return f"! {e}"
+
+    ticket_id = r.get("ticket_id") if isinstance(r, dict) else None
+    if ticket_id:
+        return (f"pedido #{pedido['id']} entregado — {kg_real:.1f}kg — "
+                f"${total:,.2f} — ticket #{ticket_id}")
+    return r.get("mensaje", f"pedido #{pedido['id']} entregado")
+
+
+def flujo_ajustar_pedido_mayoreo(stdscr) -> str:
+    """
+    Renegocia los kg de un pedido antes de despacharlo. Conecta
+    ajustar_pedido_mayoreo (pos.py:535), que existía sin nadie que la llamara.
+    """
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    pedidos = get_pedidos_mayoreo_pendientes()
+
+    if not pedidos:
+        sadd(stdscr, h // 2, w // 2 - 20,
+             "  no hay pedidos pendientes que ajustar  ", AVISO())
+        stdscr.refresh()
+        stdscr.getch()
+        return ""
+
+    encabezado(stdscr, "ajustar pedido", "mayoreo")
+    visibles = pedidos[:9]
+    for i, p in enumerate(visibles):
+        sadd(stdscr, 3 + i, 2, f"[{i+1}]", ACENTO() | curses.A_BOLD)
+        sadd(stdscr, 3 + i, 6, f"{p['cliente_nombre']:<18}", TEXTO())
+        sadd(stdscr, 3 + i, 25, f"{p['kg']:>6.1f}kg", DATO())
+        sadd(stdscr, 3 + i, 35, f"${p['precio_kg_pactado']:>6.0f}/kg", DATO())
+        sadd(stdscr, 3 + i, 48, f"prometido {p['fecha_entrega']}", CHROME())
+
+    pie(stdscr, ("1-9", "elegir pedido"), ("0/Esc", "cancelar"))
+    stdscr.refresh()
+
+    try:
+        idx = _tecla_a_idx(stdscr.getch())
+        if not (0 <= idx < len(visibles)):
+            raise _Cancelado()
+        pedido = visibles[idx]
+
+        my = 3 + len(visibles) + 1
+        sadd(stdscr, my, 2, f"kg actuales: {pedido['kg']:.1f}", DATO())
+        nuevo_kg = pedir_float_modal(stdscr, "kg nuevos:   ", my + 1, 2)
+        if nuevo_kg <= 0:
+            raise _Cancelado()
+    except _Cancelado:
+        return ""
+
+    try:
+        r = ajustar_pedido_mayoreo(pedido["id"], nuevo_kg)
+        return r["mensaje"]
+    except ErrorPOS as e:
+        return f"! {e}"
+
+
 # ── PANTALLA CORTE ────────────────────────────────────────────────────────────
 
 def pantalla_corte(stdscr, sesion: SesionPOS) -> str:
@@ -1082,7 +1283,9 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
                 sadd(stdscr, h2 // 2 - 1, w2 // 2 - 16, "[1] nuevo cliente", ACENTO())
                 sadd(stdscr, h2 // 2,     w2 // 2 - 16, "[2] capturar pedido", ACENTO())
                 sadd(stdscr, h2 // 2 + 1, w2 // 2 - 16, "[3] status de pedidos", ACENTO())
-                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[Esc] volver", TEXTO())
+                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[4] entregar pedido", ACENTO())
+                sadd(stdscr, h2 // 2 + 3, w2 // 2 - 16, "[5] ajustar pedido", ACENTO())
+                sadd(stdscr, h2 // 2 + 4, w2 // 2 - 16, "[Esc] volver", TEXTO())
                 stdscr.refresh()
                 sub_key = stdscr.getch()
                 if sub_key == ord("1"):
@@ -1091,6 +1294,10 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
                     return flujo_capturar_pedido_mayoreo(stdscr)
                 elif sub_key == ord("3"):
                     pantalla_status_pedidos(stdscr)
+                elif sub_key == ord("4"):
+                    return flujo_entregar_pedido_mayoreo(stdscr)
+                elif sub_key == ord("5"):
+                    return flujo_ajustar_pedido_mayoreo(stdscr)
                 return ""
             resultado = _modal_bloqueante(stdscr, _submenu_mayoreo)
             if resultado:
