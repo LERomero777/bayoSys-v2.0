@@ -568,7 +568,7 @@ def _leer_ticket(ticket_id: int):
     return t, get_ticket_items(ticket_id)
 
 
-def ticket_texto(ticket_id: int, pagos: dict = None,
+def ticket_texto(ticket_id: int, pagos: Optional[dict] = None,
                  cambio: float = 0.0) -> str:
     """
     El ticket tal como saldría impreso, como string y sin tocar hardware.
