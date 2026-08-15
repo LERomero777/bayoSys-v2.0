@@ -238,6 +238,133 @@ debe ser SQL puro. No lo moví.
 
 ## 7. Qué NO se tocó
 
-Ningún archivo de lógica de negocio fue modificado en esta auditoría. No se
-escribió `entregar_pedido_mayoreo`, ni `total_a_cobrar_efectivo`, ni se alteró
-`config.py`. Este documento es el entregable completo de la verificación.
+Ningún archivo de lógica de negocio fue modificado. No se escribió
+`entregar_pedido_mayoreo`, ni `total_a_cobrar_efectivo`, ni se alteró
+`config.py`, `pos.py`, `models.py`, `calcular.py`, `cierre.py` ni `guardian.py`.
+
+---
+
+# Entrega — Partes B, C.4 y D
+
+Implementadas sobre `dev`, sin la Parte A (decisión tomada tras la auditoría:
+la Parte A ya existe en la rama del exportador y construir encima habría
+duplicado trabajo).
+
+## Cada `TODO` que quedó y por qué
+
+| Dónde | Qué falta | Por qué no lo hice |
+|---|---|---|
+| `pos_tui.py`, en `flujo_entregar_pedido_mayoreo` | Reescribir `entregar_pedido_mayoreo` (`pos.py:544`) con el orden leer → validar stock → cobrar → marcar | §4.B.3 lo prohíbe explícitamente. El orden es la garantía contra pedidos fantasma |
+| `pos_tui.py`, antes de `_pantalla_efectivo` | `total_a_cobrar_efectivo` en `pos.py` + `REDONDEO_EFECTIVO` en `config.py` | §5.C.2 — capa de lógica. Queda un stub que devuelve el total sin tocar |
+| `pos_tui.py`, en `flujo_cobro` | Que `cobrar()` reciba el importe redondeado y guarde `diferencia_redondeo` | §5.C.3 — la migración ya está puesta; la ecuación del corte es lógica |
+
+## Archivos restringidos que habría necesitado tocar
+
+**`pos.py`** — tres veces, y en las tres me detuve:
+
+1. `entregar_pedido_mayoreo` (línea 544) sigue con la firma vieja.
+2. `marcar_pedido_entregado` ya pide cuatro argumentos y `pos.py:545` la llama
+   con uno. **Esto rompe el despacho hasta que hagas B.3**, y es a propósito:
+   le puse los parámetros como obligatorios en vez de darles default. Con
+   default, la llamada vieja escribiría NULL en `kg_real` y `ticket_id` sin
+   avisar — o sea, volvería a abrir el agujero de dinero en silencio. Así
+   truena de inmediato y no puede marcar un pedido como entregado sin dejar
+   constancia de la venta. La pantalla atrapa ese `TypeError` y responde
+   *"despacho no disponible"*, dejando el pedido pendiente.
+3. `total_a_cobrar_efectivo` no existe; la pantalla la importa con
+   `try/except ImportError` y cae a un stub. En cuanto la escribas, la
+   pantalla la toma sola, sin tocar la UI.
+
+**`config.py`** — no se modificó. `REDONDEO_EFECTIVO` la agregas tú.
+
+## Suposiciones que hice
+
+1. **El submenú de mayoreo ya tenía `[3] status`**, así que entregar y ajustar
+   entraron como `[4]` y `[5]`. El documento decía `[3]` y `[4]`, lo cual
+   habría pisado una opción existente.
+2. **`_Cancelado` no existía en `pos_tui.py`.** Está duplicada en `main.py:62`
+   y `registro.py:25`; agregué una tercera copia local siguiendo esa
+   convención en vez de importarla entre módulos de UI. Sigue pendiente el
+   refactor de extraerla a un módulo compartido.
+3. **La tolerancia de comparación de efectivo (`TOLERANCIA_CENTAVO`) quedó en
+   la capa de UI.** §5.C.1 la ubica en la lógica; cuando hagas ese refactor,
+   la pantalla debería tomarla de ahí.
+4. **El corte de ticket pasó a `FULL` por default** (antes `PART`). Si la POS58
+   no tiene cuchilla, el corte parcial no corta pero la alimentación se paga
+   igual. **Confirma el modelo físico.**
+5. **La nota fiscal se acortó** a "No es comprobante fiscal": la versión larga
+   medía 36 caracteres y se envolvía.
+6. **`requirements.txt` se creó aquí con las tres líneas de §3.** La rama del
+   exportador tiene su propia versión con solo `openpyxl`, así que **al juntar
+   las ramas hay conflicto en ese archivo** — trivial de resolver, pero avisado.
+
+## Resultado de `mypy`
+
+```
+mypy . --ignore-missing-imports --explicit-package-bases
+```
+
+| Rama | Errores |
+|---|---|
+| `origin/dev` (base) | **93** |
+| esta rama | **64** |
+
+Bajaron 29. Los 29 que desaparecieron son ruido de `Optional[Usb]` en
+`pos_ticket.py`, que se fue al volver el dispositivo intercambiable.
+
+Se introdujeron **3 errores nuevos, los tres intencionales** — son exactamente
+los `TODO` de arriba, y mypy sirve como recordatorio de que faltan:
+
+```
+pos.py:545      Missing positional arguments "kg_real", "ticket_id",
+                "fecha_entrega_real" in call to "marcar_pedido_entregado"
+pos_tui.py:380  Module "pos" has no attribute "total_a_cobrar_efectivo"
+pos_tui.py:1019 Too many arguments for "entregar_pedido_mayoreo"
+```
+
+`pyflakes` confirma que el cable suelto quedó conectado: en `dev` había 6
+imports muertos en `pos_tui.py` y ahora quedan 3. Los que se fueron son
+`ajustar_pedido_mayoreo`, `entregar_pedido_mayoreo` y `BOTON` — justo las
+funciones que §4 reportaba importadas y nunca invocadas. Los 3 restantes
+(`PRIORIDADES_MAYOREO`, `get_ticket_items`, `anular_ticket`) ya estaban.
+
+## Pruebas
+
+- `python3 -m unittest discover tests` → **55 pruebas, todas pasan**
+  (18 nuevas de `pos_ticket.py`).
+- Migración corrida 3 veces seguidas sin error.
+- Despacho verificado contra SQLite: el pedido sale del ticker al entregarse
+  y quedan grabados `kg_real`, `ticket_id` y `fecha_entrega_real`.
+- Pantalla de efectivo ejercitada en una sesión curses real con teclas
+  guionadas: 7 casos, incluida la prueba del float (ticket de `50.00` pagado
+  con un billete de `50`) y la acumulación de denominaciones.
+- Simulando la política de redondeo de C.2 (`REDONDEO_EFECTIVO = 0.50`), el
+  ticket de `50.10` muestra `redondeo −0.10`, cobra `50.00` y acepta el
+  billete de 50 — el síntoma exacto que reportó el operador.
+
+## Falta verificar en papel real
+
+Nada de esto se puede cerrar sin la POS58 enfrente:
+
+- Que la impresora responda a `cut(feed=False)`. La rama sin alimentación
+  puede emitir un comando distinto; si deja de cortar, vuelve a `feed=True`
+  y recorta el contenido previo.
+- Calibrar `LINEAS_AVANCE_CORTE`: probar 2, luego 3, y quedarse con el primero
+  que corte limpio sin dejar la última línea dentro del mecanismo.
+- Que `profile="POS-5890"` centre bien.
+- Que los acentos sobrevivan al `CP850` (`á é í ó ú ñ Ñ ° $`).
+- Si el modelo físico tiene cuchilla, para decidir `PART` vs `FULL`.
+
+También falta `assets/logo_ticket.png`: no lo inventé. El código ya lo carga
+si aparece y sigue sin él si no — hay una prueba que lo cubre.
+
+## Firma de `python-escpos` que no pude verificar
+
+§6.D.1 afirma que `cut(self, mode='FULL', feed=True)`. **No lo pude
+confirmar**: la librería no está instalada en este entorno. El código llama
+`cut(..., feed=False)` y atrapa `TypeError` por si esa versión no expone el
+parámetro. Corre esto en una máquina con la librería:
+
+```bash
+python3 -c "import inspect; from escpos.escpos import Escpos; print(inspect.getsource(Escpos.cut))"
+```
