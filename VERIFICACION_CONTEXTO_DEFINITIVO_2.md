@@ -277,3 +277,63 @@ falta dos respuestas de Luis:
 
 Con eso, el resto del §7 se implementa sin tocar ningún archivo restringido y
 sin dejar `TODO` de lógica.
+
+---
+
+## 7. Apéndice — `bayosys/prueba_ancho.py`
+
+Herramienta para zanjar el punto R1. No toca `pos.db` ni ningún archivo
+restringido; solo habla con la impresora.
+
+```bash
+cd bayosys
+python3 prueba_ancho.py            # las dos maquetas en pantalla
+python3 prueba_ancho.py --papel    # la regla a la POS58 — esto decide
+```
+
+La prueba de papel manda, en Font B, una regla de 48 caracteres:
+
+- sale en **un** renglón que termina en `8` → `COLS = 48`
+- sale en **dos**, el segundo empezando en `3` → `COLS = 42`
+
+Incluye una línea de control en Font A (si esas 32 se envuelven, el problema es
+otro) y, ya que el papel está corriendo, la prueba de acentos de §E.9 en CP850 y
+CP858.
+
+### Las dos geometrías
+
+Ambas cierran en cero desbordes con el catálogo real de `SKUs_DEFAULT`:
+
+| | 48 columnas | 42 columnas |
+|---|---|---|
+| nombre | 17 + 1 de holgura | 12 + 1 |
+| detalle | 18 + 1 | 17 + 1, unidad pegada (`1.253kg`) |
+| importe | 11 | 11 |
+| nombres del catálogo en una línea | **5 de 6** | 3 de 6 |
+| items a dos líneas en el demo | 1 de 5 | 2 de 5 |
+| renglones del ticket | 31 | 32 |
+
+A 42 se caen a dos líneas `Manteca 500ml` y `Artículo libre` — el segundo es el
+de descripción libre, que el operador teclea y no tiene tope.
+
+### Dos correcciones a la geometría de §E.5
+
+La maqueta aprobada define los anchos como campos exactos. Con nombres o
+detalles que llenan el campo justo, quedan dos columnas pegadas:
+
+```
+Manteca 500ml1pza x $20.00     $     20.00     <- nombre al ras
+Chicharrón   1.253kg x $230.00$    288.19      <- detalle al ras
+```
+
+La regla correcta es **contenido ≤ campo − 1** en nombre y detalle. A 48 no se
+nota porque ningún producto real llega a 18 caracteres, pero es la misma clase
+de defecto que la Parte E viene a eliminar, y a 42 sale a la primera.
+
+### El TOTAL ya no se escribe a mano
+
+La maqueta del apéndice suma sus propios items y calcula el redondeo con
+`REDONDEO_EFECTIVO`, así que el descuadre de 15.00 del R2 no puede repetirse.
+Con los valores del catálogo real el total es 1,133.19, que no es múltiplo ni de
+0.50 ni de 1.00: la línea de `redondeo` se imprime bajo cualquiera de las dos
+políticas y el demo deja de prejuzgar la decisión §8-3.
