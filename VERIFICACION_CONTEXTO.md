@@ -368,3 +368,108 @@ parámetro. Corre esto en una máquina con la librería:
 ```bash
 python3 -c "import inspect; from escpos.escpos import Escpos; print(inspect.getsource(Escpos.cut))"
 ```
+
+---
+
+# Segunda entrega — los tres TODO de lógica, ya cerrados
+
+Luis autorizó explícitamente saltarse el límite de §0 para estos tres puntos.
+Todo lo demás de la capa de negocio sigue intacto.
+
+## Lo que se cerró
+
+| TODO | Dónde quedó |
+|---|---|
+| `entregar_pedido_mayoreo` (§4.B.3) | `pos.py` — orden estricto leer → validar stock → cobrar → marcar |
+| `total_a_cobrar_efectivo` (§5.C.2) | `pos.py` + `REDONDEO_EFECTIVO = 0.50` en `config.py` |
+| `cobrar()` con redondeo (§5.C.3) | `pos.py`, `pos_db.py` — columna `diferencia_redondeo` ya poblada |
+
+## Hallazgo mayor — el corte nunca pudo cuadrar, y no es por el redondeo
+
+`calcular_corte` sumaba `pago_efectivo`, que es lo que el cliente **entregó**,
+no lo que se quedó en la caja. El cambio salía del mismo cajón y jamás se
+restaba:
+
+```
+ticket de 50.10 pagado con un billete de 100
+  el corte sumaba : 100.00
+  en el cajón hay :  50.10   (100 − 49.90 de cambio)
+  descuadre       : +49.90 por ticket
+```
+
+Con eso, `a_entregar` pedía entregar dinero que ya se había devuelto. El
+documento estimaba ~25 pesos diarios de descuadre por redondeo; este defecto
+es de otro orden de magnitud — con ~100 tickets diarios son miles de pesos.
+
+`total_ventas` tenía el mismo problema: sumaba pagos en vez de totales de
+ticket, así que las ventas del turno salían infladas por todo el cambio.
+
+**Arreglado**: el corte ahora parte del efectivo neto (`entregado − cambio`) y
+las ventas salen de `tickets.total`. Dos columnas nuevas en `cortes`,
+migración idempotente: `cambio_devuelto` y `redondeo_acumulado`.
+
+La ecuación quedó como pide §5.C.3:
+
+```
+efectivo esperado = ventas en efectivo + redondeo acumulado − gastos
+```
+
+Verificado contra un cajón simulado de 5 tickets: cuadra al centavo.
+
+**Los cortes ya guardados no se tocaron.** Sus cifras siguen calculadas con la
+fórmula vieja, así que no son comparables con los nuevos. Si necesitas la
+serie histórica consistente, hay que recalcularlos — es una decisión tuya, no
+la tomé.
+
+## Decisiones de diseño que conviene que revises
+
+1. **El redondeo va al múltiplo más cercano, no hacia abajo.** 50.10 → 50.00
+   (−0.10) pero 49.90 → 50.00 (+0.10). A la larga se compensan. Si redondeara
+   siempre hacia abajo, el negocio regalaría dinero en cada ticket.
+2. **Piso de un paso.** Un ticket de 0.20 con paso de 0.50 redondearía a 0.00
+   y saldría gratis. Ahora cobra 0.50. Improbable en el mostrador, pero era
+   dinero regalado.
+3. **Solo se redondea la parte en efectivo.** Si el ticket lleva transferencia
+   o tarjeta, esa porción se cobra al centavo exacto y solo el resto en
+   efectivo se redondea. La terminal no tiene problema físico de cambio.
+4. **`Decimal` en la política de redondeo.** Con float, `50.10/0.50` puede dar
+   `100.19999…` y tirar el redondeo al múltiplo equivocado.
+5. **`entregar_pedido_mayoreo` exige `sesion`.** El ticket de mayoreo tiene que
+   colgar del batch del turno; sin `batch_id` la venta no aparece en el corte,
+   que es justo el agujero que este flujo cierra. La pantalla ya se la pasa.
+6. **El despacho arma su propio ticket, no usa `sesion.ticket`.** Si el
+   operador tiene algo a medias en el mostrador, no se debe mezclar con el
+   mayoreo.
+7. **`TOLERANCIA_CENTAVO` se movió a `pos.py`**, como pedía §5.C.1. La UI ahora
+   la importa de ahí en vez de tener su copia.
+
+## Lo que NO se tocó
+
+`models.py`, `calcular.py`, `cierre.py`, `guardian.py`, `analisis.py`.
+`REDONDEO_EFECTIVO` quedó como constante de módulo en `config.py`, no como
+campo del dataclass `Config` — así no hay que tocar `models.py` ni migrar los
+`config.json` existentes.
+
+## Verificación
+
+- `python3 -m unittest discover tests` → **55 pruebas, todas pasan**.
+- Migración corrida **3 veces seguidas sin error**.
+- Despacho verificado contra SQLite real: rechaza kg > stock dejando el pedido
+  pendiente, cobra al precio pactado (195, no el del día 230), descuenta stock,
+  saca el pedido del ticker, y rechaza el doble despacho.
+- Corte verificado contra un cajón simulado: cuadra al centavo con redondeo,
+  cambio y gastos mezclados.
+- `mypy`: **64 → 62 errores**. Desaparecieron los 3 intencionales que marcaban
+  los TODO. Apareció 1 nuevo, `pos.py:699`, que es el mismo defecto
+  preexistente de `pos.py:444`: `SesionPOS.batch_id` está anotado `int` pero
+  en la práctica lleva un string tipo `"20260824-1"`. No lo corregí — arreglarlo
+  bien implica tocar las anotaciones de media docena de firmas.
+- `pyflakes`: sin imports muertos nuevos; siguen los 3 preexistentes.
+
+## Sigue pendiente y no lo toqué
+
+**El defecto de cuantización de kg (`pos_tui.py:176`)** — el que produce el
+`$100 → $100.05`. La captura por monto redondea kg a 3 decimales y luego
+recalcula el total desde ahí, así que la pantalla muestra una cifra y el
+ticket otra. El redondeo de efectivo lo tapa a veces, pero no lo arregla: el
+desvío nace antes, al cuantizar los kilos.

@@ -336,6 +336,34 @@ def _migrar_tickets_redondeo(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _migrar_cortes_caja(conn: sqlite3.Connection):
+    """
+    Dos renglones nuevos en el corte, para que el conteo físico de billetes
+    tenga contra qué cuadrar:
+
+        cambio_devuelto     — lo que salió del cajón como cambio
+        redondeo_acumulado  — lo que el redondeo del efectivo movió en el turno
+
+    El cambio importa más que el redondeo. 'ventas_efectivo' venía sumando
+    'pago_efectivo', que es lo que el cliente ENTREGÓ, no lo que se quedó en
+    la caja: un ticket de 50.10 pagado con un billete de 100 sumaba 100 y
+    los 49.90 de cambio nunca se restaban. Con eso, 'a_entregar' pedía
+    entregar dinero que ya se había devuelto.
+
+    Idempotente.
+    """
+    cols = _columnas(conn, "cortes")
+    if "cambio_devuelto" not in cols:
+        conn.execute(
+            "ALTER TABLE cortes ADD COLUMN cambio_devuelto REAL NOT NULL DEFAULT 0"
+        )
+    if "redondeo_acumulado" not in cols:
+        conn.execute(
+            "ALTER TABLE cortes ADD COLUMN redondeo_acumulado REAL NOT NULL DEFAULT 0"
+        )
+    conn.commit()
+
+
 # ── INIT ─────────────────────────────────────────────────────────────────────
 
 def init_db():
@@ -348,6 +376,7 @@ def init_db():
         _migrar_schema(conn)
         _migrar_pedidos_mayoreo(conn)
         _migrar_tickets_redondeo(conn)
+        _migrar_cortes_caja(conn)
 
         for sku, desc, stock, unidad, precio, tipo, origen, es_menu, orden, var in SKUs_DEFAULT:
             conn.execute("""
@@ -531,7 +560,8 @@ def get_movimientos(sku: str = None, fecha: str = None, limit: int = 50) -> list
 # ── TICKETS ───────────────────────────────────────────────────────────────────
 
 def crear_ticket(batch_id: str, operador: str,
-                 items: list, pagos: dict, cambio: float) -> int:
+                 items: list, pagos: dict, cambio: float,
+                 diferencia_redondeo: float = 0.0) -> int:
     """
     Crea un ticket completo y descuenta stock.
 
@@ -541,6 +571,10 @@ def crear_ticket(batch_id: str, operador: str,
 
     Regla de stock: solo 'libre' no descuenta (precio/desc libre, sin SKU en inventario).
     Todos los demás SKUs descuentan, incluyendo CHI (stock real de kg).
+
+    diferencia_redondeo: lo que el redondeo del efectivo movió respecto del
+    total. El campo 'total' guarda siempre la venta completa — el redondeo
+    afecta la caja, no el precio.
     """
     ahora  = datetime.now()
     fecha  = ahora.strftime("%Y-%m-%d")
@@ -555,9 +589,10 @@ def crear_ticket(batch_id: str, operador: str,
             INSERT INTO tickets
             (fecha, hora, batch_id, operador,
              pago_efectivo, pago_transfer, pago_tarjeta,
-             total, cambio)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (fecha, hora, batch_id, operador, p_ef, p_tr, p_ta, total, cambio))
+             total, cambio, diferencia_redondeo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (fecha, hora, batch_id, operador, p_ef, p_tr, p_ta,
+              total, cambio, diferencia_redondeo))
         ticket_id = cur.lastrowid
 
         for item in items:
@@ -686,27 +721,52 @@ def calcular_corte(batch_id: str = None, fecha: str = None) -> dict:
                 "SELECT * FROM gastos WHERE fecha = ?", (fecha,)
             ).fetchall()
 
-    v_ef  = sum(t["pago_efectivo"] for t in tickets)
+    def _campo(fila, nombre, default=0.0):
+        """Tolera DBs migradas a medias: la columna puede no estar."""
+        try:
+            v = fila[nombre]
+        except (IndexError, KeyError):
+            return default
+        return default if v is None else v
+
+    # pago_efectivo es lo que el cliente ENTREGÓ, no lo que se quedó en la
+    # caja. El cambio salió del mismo cajón, así que hay que restarlo para
+    # saber cuánto efectivo hay de verdad.
+    ef_recibido = sum(t["pago_efectivo"] for t in tickets)
+    cambio_dev  = sum(_campo(t, "cambio") for t in tickets)
+    redondeo    = sum(_campo(t, "diferencia_redondeo") for t in tickets)
+
+    efectivo_caja = round(ef_recibido - cambio_dev, 2)   # billetes reales
+    v_ef          = round(efectivo_caja - redondeo, 2)   # valor de venta cobrado en efectivo
     v_tr  = sum(t["pago_transfer"] for t in tickets)
     v_ta  = sum(t["pago_tarjeta"]  for t in tickets)
-    total = v_ef + v_tr + v_ta
+
+    # Las ventas salen del total de cada ticket, no de la suma de pagos:
+    # el ticket vale lo que vale aunque el efectivo se haya redondeado.
+    total = sum(_campo(t, "total") for t in tickets)
     g_tot = sum(g["monto"] for g in gastos)
     neto  = total - g_tot
     fondo = 250.0
-    a_ent = max(0.0, v_ef - g_tot - fondo)
+
+    # efectivo esperado = ventas en efectivo + redondeo acumulado − gastos
+    esperado = round(v_ef + redondeo - g_tot, 2)
+    a_ent    = max(0.0, round(esperado - fondo, 2))
 
     return dict(
-        n_tickets       = len(tickets),
-        ventas_efectivo = round(v_ef,  2),
-        ventas_transfer = round(v_tr,  2),
-        ventas_tarjeta  = round(v_ta,  2),
-        total_ventas    = round(total, 2),
-        total_gastos    = round(g_tot, 2),
-        neto            = round(neto,  2),
-        fondo_caja      = fondo,
-        a_entregar      = round(a_ent, 2),
-        gastos_detalle  = gastos,
-        tickets         = tickets,
+        n_tickets          = len(tickets),
+        ventas_efectivo    = round(v_ef,  2),
+        ventas_transfer    = round(v_tr,  2),
+        ventas_tarjeta     = round(v_ta,  2),
+        cambio_devuelto    = round(cambio_dev, 2),
+        redondeo_acumulado = round(redondeo,   2),
+        efectivo_esperado  = esperado,
+        total_ventas       = round(total, 2),
+        total_gastos       = round(g_tot, 2),
+        neto               = round(neto,  2),
+        fondo_caja         = fondo,
+        a_entregar         = a_ent,
+        gastos_detalle     = gastos,
+        tickets            = tickets,
     )
 
 def guardar_corte(batch_id: str, corte: dict, nota: str = "") -> int:
@@ -716,12 +776,14 @@ def guardar_corte(batch_id: str, corte: dict, nota: str = "") -> int:
             INSERT INTO cortes
             (fecha, hora, batch_id,
              ventas_efectivo, ventas_transfer, ventas_tarjeta,
+             cambio_devuelto, redondeo_acumulado,
              total_ventas, total_gastos, neto, fondo_caja, a_entregar, nota)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             ahora.strftime("%Y-%m-%d"), ahora.strftime("%H:%M"),
             batch_id,
             corte["ventas_efectivo"], corte["ventas_transfer"], corte["ventas_tarjeta"],
+            corte.get("cambio_devuelto", 0.0), corte.get("redondeo_acumulado", 0.0),
             corte["total_ventas"],    corte["total_gastos"],
             corte["neto"],            corte["fondo_caja"], corte["a_entregar"],
             nota

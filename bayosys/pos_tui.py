@@ -36,7 +36,8 @@ from pos import (
     get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS,
     alta_cliente_mayoreo, listar_clientes_mayoreo, capturar_pedido_mayoreo,
     ajustar_pedido_mayoreo, entregar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
-    PRIORIDADES_MAYOREO
+    PRIORIDADES_MAYOREO,
+    total_a_cobrar_efectivo, desglosar_cobro, TOLERANCIA_CENTAVO
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy, cargar_config
@@ -364,34 +365,11 @@ def draw_panel_ticket(win, sesion: SesionPOS):
 
 # ── COBRO EN EFECTIVO ─────────────────────────────────────────────────────────
 
-# Medio centavo. Comparar efectivo contra total con `<` desnudo rechaza cobros
-# legítimos cuando el total trae cola binaria; con este margen, una diferencia
-# de 1e-14 nunca puede leerse como faltante. Es tolerancia de comparación, no
-# de cobro: 10 centavos de menos siguen siendo insuficientes.
-TOLERANCIA_CENTAVO = 0.005
-
 # Billetes que de verdad circulan en el mostrador. Las monedas fraccionarias
 # quedan fuera a propósito: en Hermosillo la de 5 centavos ya no circula y la
 # de 10 casi no aparece en caja.
 DENOMINACIONES = ((ord("1"), 50), (ord("2"), 100),
                   (ord("3"), 200), (ord("4"), 500))
-
-try:
-    from pos import total_a_cobrar_efectivo
-except ImportError:
-    # TODO(Luis) — §5.C.2. La política de redondeo va en pos.py, con la
-    # constante REDONDEO_EFECTIVO en config.py. Este stub deja la pantalla
-    # funcionando idéntica a hoy (cobra el total al centavo) y la conecta
-    # sola en cuanto exista la función real.
-    #
-    #     def total_a_cobrar_efectivo(total: float) -> float:
-    #         """Redondea al múltiplo configurado. NO altera el total."""
-    #
-    # Se redondea el COBRO, nunca la venta registrada: si se redondea la
-    # venta, el histórico de precios se degrada y analisis.py empieza a
-    # producir márgenes falsos.
-    def total_a_cobrar_efectivo(total: float) -> float:
-        return total
 
 
 def _pantalla_efectivo(stdscr, total: float, my: int, mx: int) -> float:
@@ -558,19 +536,15 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         return ""
 
     pagos[metodo1] = monto1
-    restante = round(total - monto1, 2)
+
+    # Lo que falta se mide contra el importe REDONDEADO, no contra el total
+    # del ticket. Si no, un ticket de 50.10 cobrado con un billete de 50
+    # pediría un segundo método por 10 centavos que la política de redondeo
+    # ya perdonó — y que no son cobrables físicamente.
+    restante = round(desglosar_cobro(total, pagos)["total_cobrar"] - monto1, 2)
 
     if metodo1 == "efectivo":
         _dibujar_caja()   # la pantalla de efectivo dibujó lo suyo encima
-
-    # TODO(Luis) — §5.C.3. Cuando total_a_cobrar_efectivo() empiece a
-    # redondear hacia abajo, el efectivo recibido puede ser menor al total
-    # del ticket y este `restante` va a pedir un segundo método por una
-    # diferencia que en realidad ya se perdonó. Falta que cobrar() (pos.py)
-    # reciba el importe redondeado y guarde la diferencia en la columna
-    # tickets.diferencia_redondeo — la migración ya está puesta en pos_db.py.
-    # Sin ese renglón el corte no cuadra: el efectivo esperado pasa a ser
-    # ventas en efectivo + redondeo acumulado − gastos.
 
     # paso 3: ¿cubre?
     if restante <= 0:
@@ -608,14 +582,16 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 
         monto2 = pedir_float_modal(stdscr, f"  {LABELS[metodo2]}$", my + 12, mx + 2)
         pagos[metodo2] = monto2
-        total_pagado   = monto1 + monto2
-        if total_pagado < total - 0.01:
+        total_pagado   = round(monto1 + monto2, 2)
+        objetivo       = desglosar_cobro(total, pagos)["total_cobrar"]
+        if total_pagado < objetivo - TOLERANCIA_CENTAVO:
             sadd(stdscr, my + 14, mx + 2,
-                 f"  FALTA ${total-total_pagado:.2f} — [Enter]", ALERTA() | curses.A_BOLD)
+                 f"  FALTA ${objetivo-total_pagado:.2f} — [Enter]",
+                 ALERTA() | curses.A_BOLD)
             stdscr.refresh()
             stdscr.getch()
             return "retry"
-        cambio = round(total_pagado - total, 2)
+        cambio = round(total_pagado - objetivo, 2)
         if cambio > 0:
             sadd(stdscr, my + 13, mx + 2,
                  f"  CAMBIO: ${cambio:.2f}          ", AVISO() | curses.A_BOLD)
@@ -930,7 +906,7 @@ def _confirmar_diferencia_kg(stdscr, kg_pedidos: float, kg_real: float,
         raise _Cancelado()
 
 
-def flujo_entregar_pedido_mayoreo(stdscr) -> str:
+def flujo_entregar_pedido_mayoreo(stdscr, sesion: SesionPOS) -> str:
     """
     Despacha un pedido pendiente: kilos reales sobre la báscula, cobro al
     precio pactado en el pedido y cierre de su ciclo de vida.
@@ -1000,34 +976,15 @@ def flujo_entregar_pedido_mayoreo(stdscr) -> str:
     except _Cancelado:
         return ""
 
-    # TODO(Luis) — pos.py:544. entregar_pedido_mayoreo() todavía tiene la
-    # firma vieja (pedido_id) y solo prende el flag: no cobra, no descuenta
-    # stock y llama a marcar_pedido_entregado() con un solo argumento, que
-    # ya no existe. La reescritura es capa de lógica (§4.B.3) y va en este
-    # orden estricto:
-    #     1. leer el pedido y verificar que entregado == 0
-    #     2. validar kg_real <= stock CHI disponible
-    #     3. armar y cobrar el ticket a precio_kg_pactado
-    #     4. SOLO si el cobro tuvo éxito → marcar_pedido_entregado(
-    #            pedido_id, kg_real, ticket_id, fecha_entrega_real)
-    # Marcar antes de cobrar produce pedidos fantasma: entregados en el
-    # registro, invisibles en la caja.
-    # Esta pantalla ya la llama con la firma final. Mientras no exista, el
-    # TypeError se atrapa abajo y el pedido se queda pendiente — que es
-    # exactamente lo que debe pasar si el cobro no ocurrió.
+    # El cobro y el cierre viven en pos.py (§4.B.3), en orden estricto:
+    # leer → validar stock → cobrar → marcar. Si algo truena antes del
+    # cobro, el pedido se queda pendiente y se puede reintentar.
     try:
-        r = entregar_pedido_mayoreo(pedido["id"], kg_real)
-    except TypeError:
-        return ("! despacho no disponible — falta reescribir "
-                "entregar_pedido_mayoreo (pos.py:544)")
+        r = entregar_pedido_mayoreo(pedido["id"], kg_real, sesion)
     except ErrorPOS as e:
         return f"! {e}"
 
-    ticket_id = r.get("ticket_id") if isinstance(r, dict) else None
-    if ticket_id:
-        return (f"pedido #{pedido['id']} entregado — {kg_real:.1f}kg — "
-                f"${total:,.2f} — ticket #{ticket_id}")
-    return r.get("mensaje", f"pedido #{pedido['id']} entregado")
+    return r["mensaje"]
 
 
 def flujo_ajustar_pedido_mayoreo(stdscr) -> str:
@@ -1444,7 +1401,7 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
                 elif sub_key == ord("3"):
                     pantalla_status_pedidos(stdscr)
                 elif sub_key == ord("4"):
-                    return flujo_entregar_pedido_mayoreo(stdscr)
+                    return flujo_entregar_pedido_mayoreo(stdscr, sesion)
                 elif sub_key == ord("5"):
                     return flujo_ajustar_pedido_mayoreo(stdscr)
                 return ""

@@ -24,6 +24,27 @@ def _asegurar_dirs():
     os.makedirs(REGISTROS_DIR, exist_ok=True)
 
 
+# ── COBRO EN EFECTIVO ────────────────────────────────────────────────────────
+
+# Múltiplo al que se redondea el EFECTIVO a cobrar. 0.50 = medio peso,
+# 1.00 = peso cerrado. Ponerlo en 0 apaga el redondeo y vuelve a cobrar
+# al centavo exacto.
+#
+# Existe por una razón física, no contable: en Hermosillo la moneda de 5
+# centavos ya no circula y la de 10 casi no aparece en caja, así que un
+# total de 50.10 no es cobrable — ni el cliente tiene con qué pagarlo ni
+# el operador con qué dar cambio.
+#
+# Se redondea el COBRO, nunca la venta registrada: el ticket sigue
+# valiendo 50.10 y la diferencia se guarda aparte en
+# tickets.diferencia_redondeo. Si se redondeara la venta, el histórico de
+# precios se degradaría y analisis.py empezaría a producir márgenes falsos.
+#
+# Solo aplica a efectivo: la terminal (Mercado Pago / Clip) cobra al
+# centavo exacto porque no tiene problema físico de cambio.
+REDONDEO_EFECTIVO = 0.50
+
+
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 
 def cargar_config() -> Config:
