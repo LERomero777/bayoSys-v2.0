@@ -14,6 +14,7 @@ Flujo principal:
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 from pos_db import (
     init_db, get_inventario, get_sku, actualizar_stock,
@@ -28,9 +29,10 @@ from pos_db import (
     resumen_ventas_dia, formatear_ticket, get_movimientos,
     agregar_cliente_mayoreo, get_clientes_mayoreo, get_cliente_mayoreo,
     crear_pedido_mayoreo, editar_pedido_mayoreo, marcar_pedido_entregado,
+    get_pedido_mayoreo,
     get_pedidos_pendientes, get_pedidos_dia
 )
-from config import cargar_config, fecha_hoy
+from config import cargar_config, fecha_hoy, REDONDEO_EFECTIVO
 
 
 # ── TICKET EN CURSO ───────────────────────────────────────────────────────────
@@ -247,6 +249,82 @@ def ajustar_pool(nuevo_saldo: float, nota: str = "") -> dict:
         raise ErrorPOS(str(e))
 
 
+# ── POLÍTICA DE COBRO EN EFECTIVO ─────────────────────────────────────────────
+
+# Tolerancia de comparación, no de cobro. Los totales se calculan como
+# kg × precio con float, y el binario IEEE-754 no representa exacto los
+# decimales de base 10: medio centavo de margen evita que una diferencia de
+# 1e-14 se lea como faltante. Diez centavos de menos siguen siendo faltante.
+TOLERANCIA_CENTAVO = 0.005
+
+
+def total_a_cobrar_efectivo(total: float) -> float:
+    """
+    Convierte el total del ticket en un importe cobrable en efectivo,
+    redondeando al múltiplo configurado en config.REDONDEO_EFECTIVO.
+
+    NO altera el total del ticket. La venta se registra completa y la
+    diferencia se guarda aparte — redondear la venta degradaría el
+    histórico de precios del que vive analisis.py.
+
+    Redondea al múltiplo MÁS CERCANO, así que la diferencia puede caer de
+    los dos lados: 50.10 → 50.00 (−0.10) y 49.90 → 50.00 (+0.10). A la
+    larga se compensan; si siempre redondeara hacia abajo, el negocio
+    regalaría dinero en cada ticket.
+
+    Se usa Decimal a propósito: con float, 50.10/0.50 puede dar 100.19999…
+    y tirar el redondeo al múltiplo equivocado.
+    """
+    if REDONDEO_EFECTIVO <= 0:
+        return round(total, 2)
+
+    paso  = Decimal(str(REDONDEO_EFECTIVO))
+    monto = Decimal(str(round(total, 2)))
+    pasos = (monto / paso).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+    # Piso: una venta con valor nunca se cobra en cero. Sin esto, un ticket
+    # de 0.20 con paso de 0.50 redondearía a 0.00 y saldría gratis.
+    if pasos <= 0 and monto > 0:
+        return float(paso)
+
+    return float(pasos * paso)
+
+
+def desglosar_cobro(total: float, pagos: dict) -> dict:
+    """
+    Reparte un cobro entre terminal y efectivo, y aplica el redondeo solo a
+    la parte en efectivo.
+
+    La terminal (transfer / tarjeta) cobra al centavo exacto: no tiene
+    problema físico de cambio. Lo que queda por cubrir en efectivo es lo
+    único que se redondea.
+
+    Retorna:
+        total_ticket   — la venta, intacta
+        parte_terminal — lo que se cobra exacto
+        parte_efectivo — lo que falta cubrir en efectivo, sin redondear
+        cobrar_efectivo— esa misma parte ya redondeada
+        total_cobrar   — lo que de verdad hay que reunir
+        diferencia     — cobrar_efectivo − parte_efectivo (puede ser ±)
+    """
+    total     = round(total, 2)
+    terminal  = round(pagos.get("transfer", 0.0) + pagos.get("tarjeta", 0.0), 2)
+    terminal  = min(terminal, total)          # la terminal nunca cubre de más
+    resto     = round(total - terminal, 2)
+
+    if resto <= 0:
+        return dict(total_ticket=total, parte_terminal=terminal,
+                    parte_efectivo=0.0, cobrar_efectivo=0.0,
+                    total_cobrar=terminal, diferencia=0.0)
+
+    cobrar_ef  = total_a_cobrar_efectivo(resto)
+    diferencia = round(cobrar_ef - resto, 2)
+    return dict(total_ticket=total, parte_terminal=terminal,
+                parte_efectivo=resto, cobrar_efectivo=cobrar_ef,
+                total_cobrar=round(terminal + cobrar_ef, 2),
+                diferencia=diferencia)
+
+
 # ── FLUJO DE TICKET ───────────────────────────────────────────────────────────
 
 def agregar_chicharron(sesion: SesionPOS, kg: float) -> ItemTicket:
@@ -345,32 +423,41 @@ def cobrar(sesion: SesionPOS, pagos: dict) -> dict:
     if sesion.ticket is None or sesion.ticket.vacio():
         raise ErrorPOS("ticket vacío")
 
-    total_pagado = sum(pagos.values())
-    total        = sesion.ticket.total
+    total    = sesion.ticket.total
+    desglose = desglosar_cobro(total, pagos)
 
-    if total_pagado < total - 0.01:   # tolerancia de 1 centavo
+    # Lo que hay que reunir físicamente. Difiere del total del ticket solo
+    # cuando hay parte en efectivo con centavos impagables.
+    total_cobrar = desglose["total_cobrar"]
+    total_pagado = round(sum(pagos.values()), 2)
+
+    if total_pagado < total_cobrar - TOLERANCIA_CENTAVO:
         raise ErrorPOS(
-            f"pago insuficiente — total: ${total:.2f}  pagado: ${total_pagado:.2f}"
+            f"pago insuficiente — a cobrar: ${total_cobrar:.2f}  "
+            f"pagado: ${total_pagado:.2f}"
         )
 
-    cambio    = round(total_pagado - total, 2)
+    cambio    = round(total_pagado - total_cobrar, 2)
     items_raw = [i.to_dict() for i in sesion.ticket.items]
 
     ticket_id = crear_ticket(
-        batch_id = sesion.batch_id,
-        operador = sesion.operador,
-        items    = items_raw,
-        pagos    = pagos,
-        cambio   = cambio,
+        batch_id            = sesion.batch_id,
+        operador            = sesion.operador,
+        items               = items_raw,
+        pagos               = pagos,
+        cambio              = cambio,
+        diferencia_redondeo = desglose["diferencia"],
     )
 
     sesion.cerrar_ticket()
 
     return dict(
-        ticket_id = ticket_id,
-        total     = total,
-        cambio    = cambio,
-        pagos     = pagos,
+        ticket_id           = ticket_id,
+        total               = total,           # la venta, intacta
+        total_cobrar        = total_cobrar,    # lo que se pidió en caja
+        diferencia_redondeo = desglose["diferencia"],
+        cambio              = cambio,
+        pagos               = pagos,
     )
 
 
@@ -541,9 +628,101 @@ def ajustar_pedido_mayoreo(pedido_id: int, nuevo_kg: float) -> dict:
                 mensaje=f"pedido #{pedido_id} ajustado a {nuevo_kg:.1f}kg")
 
 
-def entregar_pedido_mayoreo(pedido_id: int) -> dict:
-    marcar_pedido_entregado(pedido_id)
-    return dict(pedido_id=pedido_id, mensaje=f"pedido #{pedido_id} marcado como entregado")
+def entregar_pedido_mayoreo(pedido_id: int, kg_real: float,
+                            sesion: SesionPOS) -> dict:
+    """
+    Despacha un pedido de mayoreo: cobra los kilos que de verdad salieron y
+    recién entonces lo cierra.
+
+    El orden es la garantía y no se puede reacomodar:
+
+        1. leer el pedido y verificar que siga pendiente
+        2. validar kg_real contra el stock CHI disponible
+        3. armar y cobrar el ticket a precio_kg_pactado
+        4. SOLO si el cobro tuvo éxito → marcar_pedido_entregado(...)
+
+    Marcar antes de cobrar produce pedidos fantasma: entregados en el
+    registro, invisibles en la caja. Si el cobro truena, el pedido se queda
+    pendiente y se reintenta — que es lo correcto.
+
+    El precio es el PACTADO en el pedido, no el del día: el cliente de
+    mayoreo cerró un precio y ese se respeta aunque config haya cambiado.
+
+    La captura del pedido no descuentó stock (la cantidad se negocia frente
+    al cliente); el descuento ocurre aquí, con kilos reales sobre la
+    báscula, vía crear_ticket.
+
+    Se asume cobro contra entrega. La venta a crédito está fuera de alcance:
+    sería otra feature, con su columna 'pagado' y su pantalla de cobranza.
+
+    'sesion' es obligatoria porque el ticket tiene que quedar colgado del
+    batch del turno. Sin batch_id, la venta no aparece en el corte — que es
+    justo el agujero de dinero que este flujo viene a cerrar.
+    """
+    if sesion is None:
+        raise ErrorPOS("no hay sesión de POS abierta — el despacho necesita batch")
+
+    # 1. el pedido existe y sigue pendiente
+    pedido = get_pedido_mayoreo(pedido_id)
+    if pedido is None:
+        raise ErrorPOS(f"el pedido #{pedido_id} no existe")
+    if pedido["entregado"]:
+        raise ErrorPOS(f"el pedido #{pedido_id} ya fue entregado")
+
+    # 2. los kilos son plausibles y hay de dónde sacarlos
+    if kg_real <= 0:
+        raise ErrorPOS("kg debe ser mayor a 0")
+
+    row   = get_sku("CHI")
+    stock = row["stock"] if row else 0.0
+    if kg_real > stock + TOLERANCIA_CENTAVO:
+        raise ErrorPOS(
+            f"stock insuficiente — Chicharrón: {stock:.1f}kg disponibles, "
+            f"el despacho pide {kg_real:.1f}kg"
+        )
+
+    # 3. cobrar. Ticket propio, no el del mostrador: si el operador tiene
+    #    algo a medias en la pantalla, no se debe mezclar con el mayoreo.
+    kg_real   = round(kg_real, 3)
+    precio_kg = pedido["precio_kg_pactado"]
+    total     = round(kg_real * precio_kg, 2)
+
+    items = [dict(
+        sku         = "CHI",
+        descripcion = f"Chicharrón mayoreo — {pedido['cliente_nombre']}"[:30],
+        cantidad    = kg_real,
+        precio_unit = precio_kg,
+        subtotal    = total,
+    )]
+
+    ticket_id = crear_ticket(
+        batch_id            = sesion.batch_id,
+        operador            = sesion.operador,
+        items               = items,
+        pagos               = {"efectivo": total},
+        cambio              = 0.0,
+        diferencia_redondeo = 0.0,
+    )
+
+    # 4. cobrado. Ahora sí se cierra el pedido.
+    fecha_real = fecha_hoy()
+    marcar_pedido_entregado(pedido_id, kg_real, ticket_id, fecha_real)
+
+    kg_pedidos = pedido["kg"]
+    return dict(
+        pedido_id          = pedido_id,
+        ticket_id          = ticket_id,
+        cliente            = pedido["cliente_nombre"],
+        kg_pedidos         = kg_pedidos,
+        kg_real            = kg_real,
+        precio_kg          = precio_kg,
+        total              = total,
+        fecha_entrega_real = fecha_real,
+        mensaje            = (f"pedido #{pedido_id} entregado — "
+                              f"{pedido['cliente_nombre']} — {kg_real:.1f}kg "
+                              f"× ${precio_kg:,.0f} = ${total:,.2f} — "
+                              f"ticket #{ticket_id}"),
+    )
 
 
 def get_pedidos_mayoreo_pendientes() -> list:
