@@ -148,6 +148,18 @@ def pedir_kg_o_monto_modal(stdscr, nombre: str, precio_kg: float, y: int, x: int
     se muestran juntos — llenar uno calcula el otro con precio_kg.
     Enter vacío (o Esc) en 'kg' pasa el turno a 'monto'; vacío en ambos cancela.
     Retorna (kg, monto); (0.0, 0.0) si se cancela.
+
+    El monto que retorna es SIEMPRE el que corresponde a los kg — nunca el
+    que tecleó el operador. Al capturar por monto, los kg se cuantizan a
+    gramos y el total se recalcula desde ahí, así que pedir "$100 de
+    chicharrón" a $230/kg da 0.435kg = $100.05. Antes se devolvía el 100
+    tecleado y la pantalla anunciaba un importe que el ticket no cobraba:
+    ese era el caso "$40 → $100.05" que reportó el operador.
+
+    No se ajusta el precio unitario para cuadrar el monto exacto: eso
+    ensuciaría el histórico de precios del que vive analisis.py. El cliente
+    igual termina pagando la cifra redonda, porque el redondeo de efectivo
+    (config.REDONDEO_EFECTIVO) lleva $100.05 a $100.00 en la caja.
     """
     label_kg    = f"kg {nombre}: "
     label_monto = "$ monto:    "
@@ -175,10 +187,20 @@ def pedir_kg_o_monto_modal(stdscr, nombre: str, precio_kg: float, y: int, x: int
         return 0.0, 0.0
 
     kg = round(monto / precio_kg, 3)
+
+    # El total de verdad, recalculado desde los gramos que se van a pesar.
+    # Si difiere de lo tecleado, se muestra: el operador tiene que ver la
+    # cifra que va a salir en el ticket, no la que pidió el cliente.
+    monto_real = round(kg * precio_kg, 2)
     sadd(stdscr, y, cx, f"{kg:.3f}  (calculado)", OK())
-    stdscr.refresh()
-    curses.napms(700)
-    return kg, round(monto, 2)
+    if abs(monto_real - monto) >= 0.01:
+        sadd(stdscr, y + 1, cx, f"{monto_real:.2f}  (ajustado a gramos)  ", AVISO())
+        stdscr.refresh()
+        curses.napms(1100)
+    else:
+        stdscr.refresh()
+        curses.napms(700)
+    return kg, monto_real
 
 def _modal_bloqueante(stdscr, fn, *args, **kwargs):
     """
@@ -1187,8 +1209,11 @@ def _procesar_item(stdscr, sesion: SesionPOS, row, h: int, w: int) -> str:
             kg, monto = pedir_kg_o_monto_modal(stdscr, nombre, cfg.precio_chi_pub, h // 2, w // 2 - 14)
             if kg <= 0:
                 return ""
-            agregar_chicharron(sesion, kg)
-            return f"{nombre} {kg:.3f}kg (${monto:,.2f}) agregado"
+            # El importe del mensaje sale del item recién agregado, no del
+            # monto capturado: así la barra de estado no puede anunciar una
+            # cifra distinta a la que el ticket cobra.
+            item = agregar_chicharron(sesion, kg)
+            return f"{nombre} {kg:.3f}kg (${item.subtotal:,.2f}) agregado"
 
         elif tipo == "variable":
             # precio negociado en el momento (CUB)

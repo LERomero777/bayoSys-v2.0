@@ -466,10 +466,62 @@ campo del dataclass `Config` — así no hay que tocar `models.py` ni migrar los
   bien implica tocar las anotaciones de media docena de firmas.
 - `pyflakes`: sin imports muertos nuevos; siguen los 3 preexistentes.
 
-## Sigue pendiente y no lo toqué
+---
 
-**El defecto de cuantización de kg (`pos_tui.py:176`)** — el que produce el
-`$100 → $100.05`. La captura por monto redondea kg a 3 decimales y luego
-recalcula el total desde ahí, así que la pantalla muestra una cifra y el
-ticket otra. El redondeo de efectivo lo tapa a veces, pero no lo arregla: el
-desvío nace antes, al cuantizar los kilos.
+# Tercera entrega — el defecto de captura por monto
+
+Luis levantó todas las restricciones. Lo único de dinero que quedaba abierto
+era la cuantización de kg de `pos_tui.py:176`.
+
+## No era un error de cálculo, era una mentira en pantalla
+
+La aritmética estaba bien: los kg se cuantizan a gramos y el total se
+recalcula desde ahí, así que `$100` a `$230/kg` da `0.435kg = $100.05`. Eso es
+correcto y no se puede evitar mientras la báscula trabaje en gramos.
+
+El defecto era que **la pantalla anunciaba el monto tecleado y el ticket
+cobraba el recalculado**. Los dos números nunca coincidían y nadie lo veía.
+
+## El arreglo
+
+`pedir_kg_o_monto_modal` ahora devuelve siempre el importe que corresponde a
+los kg, nunca el tecleado, y lo muestra etiquetado como *(ajustado a gramos)*
+cuando difiere. El mensaje de la barra de estado sale del `subtotal` del item
+recién agregado, así que por construcción no puede anunciar una cifra distinta
+a la que el ticket cobra.
+
+## Lo que NO se hizo, a propósito
+
+**No se ajusta el precio unitario para cuadrar el monto exacto.** Sería
+tentador: bastaría con poner `precio_unit = monto / kg` y el ticket daría
+exactamente `$100`. Pero eso mete un precio inventado en `ticket_items` por
+cada venta capturada por monto, y `analisis.py` construye desde ahí los
+precios recomendados y los márgenes. Se arreglaría la pantalla ensuciando el
+histórico — justo lo que §5.C.2 prohíbe para el redondeo, por la misma razón.
+
+## El cliente igual paga la cifra redonda
+
+Resulta que la política de redondeo de efectivo ya resolvía el problema de
+cara al cliente, en los cinco casos reportados:
+
+```
+monto tecleado -> kg -> total del ticket -> efectivo cobrado
+   $ 40  -> 0.174kg -> $ 40.02 -> $ 40.00
+   $ 50  -> 0.217kg -> $ 49.91 -> $ 50.00
+   $100  -> 0.435kg -> $100.05 -> $100.00
+   $200  -> 0.870kg -> $200.10 -> $200.00
+   $300  -> 1.304kg -> $299.92 -> $300.00
+```
+
+Quien pide "$100 de chicharrón" paga $100. El ticket conserva los $100.05
+reales y la diferencia queda registrada en `tickets.diferencia_redondeo`.
+
+## Verificación
+
+`tests/test_captura_por_monto.py` — 5 pruebas nuevas que fijan: que el caso
+reportado da 100.05, que el desvío nunca pasa de medio gramo, que el cliente
+termina pagando la cifra redonda, que la venta registrada NO se redondea, y
+que el precio unitario queda intacto.
+
+`python3 -m unittest discover tests` → **60 pruebas, todas pasan**.
+`mypy` se mantiene en 62; `pyflakes` sin imports muertos nuevos.
