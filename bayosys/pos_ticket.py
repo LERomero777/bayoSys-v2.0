@@ -59,7 +59,7 @@ PERFIL = "POS-5890"
 # Las térmicas arrancan en CP437, que no trae los acentos del español: sin
 # fijar esto, "chicharrón" sale como basura en el ticket del cliente.
 # VERIFICAR EN PAPEL con: á é í ó ú ñ Ñ ° $
-CODEPAGE = "CP850"
+CODEPAGE = 2
 
 # Líneas que se alimentan antes de cortar. Calibrado a la barra de arranque
 # de la POS58, que está 2-3 cm por encima del cabezal: con menos, la última
@@ -72,7 +72,7 @@ LINEAS_AVANCE_CORTE = 3
 
 # ── Constantes de negocio ──────────────────────────────────────────────────────
 NEGOCIO   = "PRODUCTOS EL BAYO"
-GIRO      = "chicharrón y manteca"
+GIRO      = "ROOL940818JK8"
 CIUDAD    = "HERMOSILLO, SON."
 DIRECCION = "Lauro Galvez #171"
 COLONIA   = "Col. Palo Verde"
@@ -80,11 +80,14 @@ COLONIA   = "Col. Palo Verde"
 # El ticket no ampara fiscalmente. Se dice en el papel para no discutirlo
 # después con quien lo quiera presentar como factura. Cabe en 32 columnas:
 # la versión larga ("Este ticket no es comprobante fiscal") se envolvía.
-NOTA_FISCAL = "No es comprobante fiscal"
+NOTA_FISCAL = "ESTE TICKET NO ES UN COMPROBANTE FISCAL"
 
-# Ancho útil en caracteres con Font A en papel de 58mm. Todo el diseño vive
-# dentro de estas columnas: una línea de 33 no se recorta, se envuelve, y
-# rompe la alineación de todo lo que sigue.
+# Ancho útil en caracteres con Font A en papel de 58mm. Confirmado en papel
+# el 27-ago: Font A imprime 32 cols en un solo renglón sin partirse; Font B
+# midió 42, no 48 como decía el comentario viejo — se descartó Font B por
+# legibilidad (clientes de la tercera edad). Todo el diseño vive dentro de
+# estas columnas: una línea de 33 no se recorta, se envuelve, y rompe la
+# alineación de todo lo que sigue.
 COLS = 32
 
 # Logo opcional. Si el archivo no está, el ticket sale sin logo — nunca se
@@ -270,10 +273,22 @@ class Ticket:
                 self._p = Usb(VID, PID, timeout=USB_TIMEOUT,
                               in_ep=0x87, out_ep=0x06, profile=PERFIL)
             except Exception:
+                # El primer intento pudo haber reclamado el dispositivo antes
+                # de fallar. Hay que soltarlo o el segundo intento choca con
+                # el primero y truena con "Could not set configuration".
+                try:
+                    if self._p is not None:
+                        self._p.close()
+                except Exception:
+                    pass
                 self._p = Usb(VID, PID, timeout=USB_TIMEOUT,
                               in_ep=0x87, out_ep=0x06)
         except Exception as e:
             raise ErrorImpresora(f"no se pudo conectar a la impresora: {e}") from e
+
+        # Limpia doble-strike/doble-ancho de fábrica que python-escpos no
+        # resetea solo. Sin esto, .set(bold=False) no tiene efecto real.
+        self._reset_modos()
 
         # Acentos. Si el codepage no está disponible en este perfil, seguimos
         # con el default antes que abortar el ticket.
@@ -283,6 +298,24 @@ class Ticket:
             pass
 
         return self
+
+    def _reset_modos(self) -> None:
+        """
+        Limpia modos de fábrica que python-escpos no resetea al conectar.
+        Muchas POS58 clonas traen double-strike o doble-ancho activo de
+        fábrica; sin esta secuencia, .set() del código de arriba parte de
+        un estado que no es el que asume.
+        """
+        try:
+            self._p._raw(b'\x1b\x21\x00')   # ESC ! 0  - modo normal
+            self._p._raw(b'\x1d\x21\x00')   # GS  ! 0  - doble ancho/alto off
+            self._p._raw(b'\x1b\x45\x00')   # ESC E 0  - negrita off
+            self._p._raw(b'\x1b\x47\x00')   # ESC G 0  - double-strike off
+            self._p._raw(b'\x1b\x20\x00')   # ESC SP 0 - espaciado default
+            self._p._raw(b'\x1b\x4d\x00')   # ESC M 0  - Font A (32 col, confirmado en papel — más legible para clientes de la tercera edad)
+        except Exception:
+            pass
+
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._p and self._propio:
@@ -322,10 +355,10 @@ class Ticket:
         # El nombre del negocio es lo más grande del papel junto con el total.
         # Doble ancho parte las columnas a la mitad: 17 caracteres caben en 16
         # celdas justas, así que va a doble alto solamente.
-        p.set(align="center", bold=True, double_height=True, double_width=False)
+        p.set(align="center", bold=True, normal_textsize=True)
         p.text(f"{NEGOCIO}\n")
 
-        p.set(align="center", bold=False, double_height=False)
+        p.set(align="center", bold=False, normal_textsize=True)
         p.text(f"{GIRO}\n")
         p.text(f"{CIUDAD}\n")
         p.text(f"{DIRECCION}\n")
@@ -391,7 +424,7 @@ class Ticket:
 
     def separador(self, char: str = "-") -> "Ticket":
         """Línea divisoria horizontal."""
-        self._p.set(align="left", double_width=False)
+        self._p.set(align="left", normal_textsize=True)
         self._p.text(char * COLS + "\n")
         return self
 
@@ -405,25 +438,23 @@ class Ticket:
         # alto y doble ancho, lo más grande del ticket. La etiqueta se queda
         # en tamaño normal arriba — con doble ancho solo caben 16 celdas y el
         # importe se las lleva todas.
-        self._p.set(align="right", bold=True,
-                    double_height=False, double_width=False)
+        self._p.set(align="right", bold=True, normal_textsize=True)
         self._p.text("TOTAL\n")
-        self._p.set(align="right", bold=True,
-                    double_height=True, double_width=True)
+        self._p.set(align="right", bold=True, normal_textsize=True)
         self._p.text(f"${gran_total:>9.2f}\n")
-        self._p.set(bold=False, double_height=False, double_width=False)
+        self._p.set(bold=False, normal_textsize=True)
 
         if nota:
             self.separador()
-            self._p.set(align="left")
+            self._p.set(align="center")
             for linea in _envolver(nota):
                 self._p.text(f"{linea}\n")
 
-        self.separador()
         self._p.set(align="center")
         self._p.text("Gracias por su compra\n")
-        self._p.text(f"{NOTA_FISCAL}\n")
-
+        for linea in _envolver(NOTA_FISCAL):
+            self._p.text(f"{linea}\n")
+       
         return self
 
     def codigo_barras(self, folio: str = "") -> "Ticket":
@@ -599,6 +630,30 @@ def ticket_texto(ticket_id: int, pagos: Optional[dict] = None,
         tk.corte()
     return lienzo.render()
 
+def abrir_cajon(pin: int = 2) -> bool:
+    """
+    Pulso al cajón de dinero via la impresora (el cable del cajón entra
+    por el mismo puerto RJ11/RJ12 de la POS58).
+
+    Nunca debe bloquear el cobro: si falla, el dinero ya se recibió y
+    el cajero lo abre a mano. Por eso no lanza ErrorImpresora — solo
+    regresa False si no pudo.
+    """
+    if Usb is None:
+        return False
+    p = None
+    try:
+        p = Usb(VID, PID, timeout=USB_TIMEOUT, in_ep=0x87, out_ep=0x06)
+        p.cashdraw(pin)
+        return True
+    except Exception:
+        return False
+    finally:
+        if p is not None:
+            try:
+                p.close()
+            except Exception:
+                pass
 
 # ── PUENTE CON EL POS — imprime un ticket ya cobrado en SQLite ──────────────────
 

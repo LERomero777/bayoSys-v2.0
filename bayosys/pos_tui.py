@@ -41,6 +41,7 @@ from pos import (
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy, cargar_config
 from models import LT_POR_CUBETA
+from pos_ticket import imprimir_ticket_fisico, abrir_cajon, ErrorImpresora
 from estilos import (
     init_colors, sadd, hline, marco, caja, divisor, encabezado, pie,
     abrir_lienzo,
@@ -630,6 +631,9 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         resultado = cobrar(sesion, pagos)
         ticket_id = resultado["ticket_id"]
         cambio    = resultado["cambio"]
+
+        if IMPRESORA_DISPONIBLE:
+            abrir_cajon()
 
         txt  = imprimir_ticket(ticket_id)
         ruta = os.path.expanduser(f"~/bayosys/data/ticket_{ticket_id:04d}.txt")
