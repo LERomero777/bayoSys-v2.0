@@ -28,6 +28,7 @@ Layout:
 
 import curses
 import os
+from typing import Optional
 from pos import (
     iniciar_pos, agregar_chicharron, agregar_producto,
     agregar_producto_precio_variable, agregar_articulo_libre,
@@ -35,7 +36,7 @@ from pos import (
     carga_manual_stock, get_estado_inventario, get_resumen_turno, get_pool_lt,
     get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS,
     alta_cliente_mayoreo, listar_clientes_mayoreo, capturar_pedido_mayoreo,
-    ajustar_pedido_mayoreo, entregar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
+    ajustar_pedido_mayoreo, entregar_pedido_mayoreo, cerrar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
     PRIORIDADES_MAYOREO
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
@@ -496,12 +497,15 @@ def _pantalla_efectivo(stdscr, total: float, my: int, mx: int) -> float:
 
 # ── FLUJO COBRO ───────────────────────────────────────────────────────────────
 
-def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
+def flujo_cobro(stdscr, sesion: SesionPOS) -> tuple[str, Optional[int]]:
     """
     Modal de cobro inteligente.
     1. Elige método principal → ingresa monto
     2. Si cubre → cobra con cambio
     3. Si no cubre → pide segundo método
+
+    Regresa (mensaje, ticket_id). ticket_id es None si se canceló o si
+    el pago no cuadró — solo trae un id real cuando cobrar() se ejecutó.
     """
     h, w  = stdscr.getmaxyx()
     total = sesion.ticket.total
@@ -541,7 +545,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
     while True:
         key = stdscr.getch()
         if key == 27:
-            return ""
+            return "", None
         if key in METODOS:
             metodo1 = METODOS[key]
             break
@@ -556,7 +560,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
         _dibujar_caja()
         monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
     if monto1 <= 0:
-        return ""
+        return "", None
 
     pagos[metodo1] = monto1
     restante = round(total - monto1, 2)
@@ -586,7 +590,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
              "  [Enter] cobrar  [Esc] cancelar", TEXTO())
         stdscr.refresh()
         if not _esperar_confirmacion(stdscr):
-            return ""
+            return "", None
     else:
         # necesita segundo método — loopea hasta un método válido y distinto al primero
         sadd(stdscr, my + 11, mx + 2,
@@ -597,7 +601,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
             stdscr.refresh()
             key = stdscr.getch()
             if key == 27:
-                return ""
+                return "", None
             if key in METODOS and METODOS[key] != metodo1:
                 metodo2 = METODOS[key]
                 break
@@ -615,7 +619,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
                  f"  FALTA ${total-total_pagado:.2f} — [Enter]", ALERTA() | curses.A_BOLD)
             stdscr.refresh()
             stdscr.getch()
-            return "retry"
+            return "retry", None
         cambio = round(total_pagado - total, 2)
         if cambio > 0:
             sadd(stdscr, my + 13, mx + 2,
@@ -624,7 +628,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
              "  [Enter] cobrar  [Esc] cancelar  ", TEXTO())
         stdscr.refresh()
         if not _esperar_confirmacion(stdscr):
-            return ""
+            return "", None
 
     # paso 4: cobrar
     try:
@@ -649,18 +653,17 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 
         if key in (ord("p"), ord("P")):
             if not IMPRESORA_DISPONIBLE:
-                return f"ticket #{ticket_id:04d} cobrado — sin impresora, respaldo en {ruta}"
+                return f"ticket #{ticket_id:04d} cobrado — sin impresora, respaldo en {ruta}", ticket_id
             try:
                 imprimir_ticket_fisico(ticket_id, pagos, cambio)
-                return f"ticket #{ticket_id:04d} cobrado e impreso OK"
+                return f"ticket #{ticket_id:04d} cobrado e impreso OK", ticket_id
             except ErrorImpresora as e:
-                return f"ticket #{ticket_id:04d} cobrado, NO imprimió ({e})"
+                return f"ticket #{ticket_id:04d} cobrado, NO imprimió ({e})", ticket_id
 
-        return f"ticket #{ticket_id:04d} cobrado OK — cambio ${cambio:.2f}"
+        return f"ticket #{ticket_id:04d} cobrado OK — cambio ${cambio:.2f}", ticket_id
 
     except ErrorPOS as e:
-        return f"ERROR: {e}"
-
+        return f"ERROR: {e}", None
 
 # ── PANTALLA INVENTARIO ───────────────────────────────────────────────────────
 
@@ -934,7 +937,7 @@ def _confirmar_diferencia_kg(stdscr, kg_pedidos: float, kg_real: float,
         raise _Cancelado()
 
 
-def flujo_entregar_pedido_mayoreo(stdscr) -> str:
+def flujo_entregar_pedido_mayoreo(stdscr, sesion) -> str:
     """
     Despacha un pedido pendiente: kilos reales sobre la báscula, cobro al
     precio pactado en el pedido y cierre de su ciclo de vida.
@@ -1004,83 +1007,27 @@ def flujo_entregar_pedido_mayoreo(stdscr) -> str:
     except _Cancelado:
         return ""
 
-    # TODO(Luis) — pos.py:544. entregar_pedido_mayoreo() todavía tiene la
-    # firma vieja (pedido_id) y solo prende el flag: no cobra, no descuenta
-    # stock y llama a marcar_pedido_entregado() con un solo argumento, que
-    # ya no existe. La reescritura es capa de lógica (§4.B.3) y va en este
-    # orden estricto:
-    #     1. leer el pedido y verificar que entregado == 0
-    #     2. validar kg_real <= stock CHI disponible
-    #     3. armar y cobrar el ticket a precio_kg_pactado
-    #     4. SOLO si el cobro tuvo éxito → marcar_pedido_entregado(
-    #            pedido_id, kg_real, ticket_id, fecha_entrega_real)
-    # Marcar antes de cobrar produce pedidos fantasma: entregados en el
-    # registro, invisibles en la caja.
-    # Esta pantalla ya la llama con la firma final. Mientras no exista, el
-    # TypeError se atrapa abajo y el pedido se queda pendiente — que es
-    # exactamente lo que debe pasar si el cobro no ocurrió.
+    # El ítem se carga al ticket a precio_kg_pactado; el cobro real corre
+    # por flujo_cobro(), la misma ruta que usa el POS normal, para no
+    # duplicar lógica de pago ni de descuento de stock. Solo si el cobro
+    # tuvo éxito (ticket_id real) se marca el pedido como entregado —
+    # marcar antes produce pedidos fantasma: entregados en el registro,
+    # invisibles en la caja.
     try:
-        r = entregar_pedido_mayoreo(pedido["id"], kg_real)
-    except TypeError:
-        return ("! despacho no disponible — falta reescribir "
-                "entregar_pedido_mayoreo (pos.py:544)")
+        entregar_pedido_mayoreo(sesion, pedido["id"], kg_real)
     except ErrorPOS as e:
         return f"! {e}"
 
-    ticket_id = r.get("ticket_id") if isinstance(r, dict) else None
-    if ticket_id:
-        return (f"pedido #{pedido['id']} entregado — {kg_real:.1f}kg — "
-                f"${total:,.2f} — ticket #{ticket_id}")
-    return r.get("mensaje", f"pedido #{pedido['id']} entregado")
+    mensaje, ticket_id = flujo_cobro(stdscr, sesion)
 
+    if ticket_id is None:
+        # cobro cancelado o incompleto (Esc, o pago no cuadró) — el ítem
+        # se queda en sesion.ticket y el pedido sigue pendiente.
+        return mensaje or "! despacho cancelado — el pedido sigue pendiente"
 
-def flujo_ajustar_pedido_mayoreo(stdscr) -> str:
-    """
-    Renegocia los kg de un pedido antes de despacharlo. Conecta
-    ajustar_pedido_mayoreo (pos.py:535), que existía sin nadie que la llamara.
-    """
-    stdscr.erase()
-    h, w = stdscr.getmaxyx()
-    pedidos = get_pedidos_mayoreo_pendientes()
-
-    if not pedidos:
-        sadd(stdscr, h // 2, w // 2 - 20,
-             "  no hay pedidos pendientes que ajustar  ", AVISO())
-        stdscr.refresh()
-        stdscr.getch()
-        return ""
-
-    encabezado(stdscr, "ajustar pedido", "mayoreo")
-    visibles = pedidos[:9]
-    for i, p in enumerate(visibles):
-        sadd(stdscr, 3 + i, 2, f"[{i+1}]", ACENTO() | curses.A_BOLD)
-        sadd(stdscr, 3 + i, 6, f"{p['cliente_nombre']:<18}", TEXTO())
-        sadd(stdscr, 3 + i, 25, f"{p['kg']:>6.1f}kg", DATO())
-        sadd(stdscr, 3 + i, 35, f"${p['precio_kg_pactado']:>6.0f}/kg", DATO())
-        sadd(stdscr, 3 + i, 48, f"prometido {p['fecha_entrega']}", CHROME())
-
-    pie(stdscr, ("1-9", "elegir pedido"), ("0/Esc", "cancelar"))
-    stdscr.refresh()
-
-    try:
-        idx = _tecla_a_idx(stdscr.getch())
-        if not (0 <= idx < len(visibles)):
-            raise _Cancelado()
-        pedido = visibles[idx]
-
-        my = 3 + len(visibles) + 1
-        sadd(stdscr, my, 2, f"kg actuales: {pedido['kg']:.1f}", DATO())
-        nuevo_kg = pedir_float_modal(stdscr, "kg nuevos:   ", my + 1, 2)
-        if nuevo_kg <= 0:
-            raise _Cancelado()
-    except _Cancelado:
-        return ""
-
-    try:
-        r = ajustar_pedido_mayoreo(pedido["id"], nuevo_kg)
-        return r["mensaje"]
-    except ErrorPOS as e:
-        return f"! {e}"
+    r = cerrar_pedido_mayoreo(pedido["id"], kg_real, ticket_id)
+    sesion.nuevo_ticket()
+    return f"{r['mensaje']} — {mensaje}"
 
 
 # ── PANTALLA CORTE ────────────────────────────────────────────────────────────
@@ -1368,9 +1315,9 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
         # ── COBRAR ────────────────────────────────────────────────────
         elif key in (ord("p"), ord("P")):
             if sesion.ticket and not sesion.ticket.vacio():
-                resultado = _modal_bloqueante(stdscr, flujo_cobro, sesion)
-                if resultado and resultado != "retry":
-                    msg = resultado
+                mensaje, ticket_id = _modal_bloqueante(stdscr, flujo_cobro, sesion)
+                if mensaje and mensaje != "retry":
+                    msg = mensaje
                     sesion.nuevo_ticket()
             else:
                 msg = "! ticket vacío"
@@ -1448,7 +1395,7 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
                 elif sub_key == ord("3"):
                     pantalla_status_pedidos(stdscr)
                 elif sub_key == ord("4"):
-                    return flujo_entregar_pedido_mayoreo(stdscr)
+                    return flujo_entregar_pedido_mayoreo(stdscr, sesion)
                 elif sub_key == ord("5"):
                     return flujo_ajustar_pedido_mayoreo(stdscr)
                 return ""

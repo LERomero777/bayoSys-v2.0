@@ -28,7 +28,7 @@ from pos_db import (
     resumen_ventas_dia, formatear_ticket, get_movimientos,
     agregar_cliente_mayoreo, get_clientes_mayoreo, get_cliente_mayoreo,
     crear_pedido_mayoreo, editar_pedido_mayoreo, marcar_pedido_entregado,
-    get_pedidos_pendientes, get_pedidos_dia
+    get_pedido_mayoreo, get_pedidos_pendientes, get_pedidos_dia
 )
 from config import cargar_config, fecha_hoy
 
@@ -541,10 +541,51 @@ def ajustar_pedido_mayoreo(pedido_id: int, nuevo_kg: float) -> dict:
                 mensaje=f"pedido #{pedido_id} ajustado a {nuevo_kg:.1f}kg")
 
 
-def entregar_pedido_mayoreo(pedido_id: int) -> dict:
-    marcar_pedido_entregado(pedido_id)
-    return dict(pedido_id=pedido_id, mensaje=f"pedido #{pedido_id} marcado como entregado")
+def entregar_pedido_mayoreo(sesion, pedido_id: int, kg_real: float) -> dict:
+    """
+    Valida el pedido y carga el chicharrón al ticket en curso, al precio
+    pactado con el cliente — NO cobra. El cobro lo hace flujo_cobro() en
+    pos_tui.py, la misma ruta que usa el POS normal, para no duplicar la
+    lógica de pago ni de descuento de stock.
+    """
+    if kg_real <= 0:
+        raise ErrorPOS("Kg debe ser mayor que 0")
+    pedido = get_pedido_mayoreo(pedido_id)
+    if pedido is None:
+        raise ErrorPOS(f"pedido #{pedido_id} no existe")
+    if pedido["entregado"]:
+        raise  ErrorPOS(f"pedido #{pedido_id} ya fue entregado")
 
+    stock_chi = get_sku("CHI")
+    disponible = stock_chi["stock"] if stock_chi else 0.0
+    if disponible < kg_real:
+        raise ErrorPOS(
+            f"stock insuficiente — CHI: {disponible:.2f}kg disponibles, "
+            f"pediste {kg_real:.2f}kg"
+        )
+    if sesion.ticket and not sesion.ticket.vacio():
+        raise ErrorPOS(
+            "hay un ticket abierto en el POS — cóbralo o límpialo antes "
+            "de despachar un pedido de mayoreo"
+        )    
+    if sesion.ticket is None:
+        sesion.nuevo_ticket()
+    agregar_producto_precio_variable(
+        sesion, "CHI", kg_real, pedido["precio_kg_pactado"]
+    )
+    return dict(pedido=pedido, kg_real=kg_real)
+
+def cerrar_pedido_mayoreo(pedido_id: int, kg_real: float, ticket_id: int) -> dict:
+    """
+    Marca el pedido como entregado. Solo se llama DESPUÉS de que el cobro
+    tuvo éxito y hay un ticket_id real — marcar antes produce pedidos
+    fantasma: entregados en el registro, invisibles en la caja.
+    """
+    marcar_pedido_entregado(pedido_id, kg_real, ticket_id, fecha_hoy())
+    return dict(
+        pedido_id=pedido_id, ticket_id=ticket_id,
+        mensaje=f"pedido #{pedido_id} entregado — ticket #{ticket_id}"
+    )
 
 def get_pedidos_mayoreo_pendientes() -> list:
     """Fuente única para el ticker y la pantalla de status — ya vienen
