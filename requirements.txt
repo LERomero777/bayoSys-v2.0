@@ -1,0 +1,18 @@
+# Dependencias de bayoSys v2.0 — Python 3.10+
+#
+# Instalar con:  pip install -r requirements.txt
+
+# Impresión térmica ESC/POS en la FMD POS58 por USB.
+# El extra [usb] arrastra pyusb, que es lo que habla con el dispositivo.
+# pos_ticket.py funciona sin esta librería para generar el TEXTO del ticket;
+# solo la necesita para mandarlo al papel.
+python-escpos[usb]==3.1
+
+# Verificación estática. Se corre a mano, no en runtime:
+#   mypy . --ignore-missing-imports --explicit-package-bases
+mypy==2.3.0
+
+# Reportes .xlsx. Fijado a la última estable compatible con Python 3.10.
+# En la Acer (Celeron N2840, 4 GB) hay que abrir el libro con write_only=True:
+# en modo normal openpyxl carga todo en memoria y un rango largo la tumba.
+openpyxl==3.1.5

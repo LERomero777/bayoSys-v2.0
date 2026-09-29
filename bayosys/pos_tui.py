@@ -28,6 +28,7 @@ Layout:
 
 import curses
 import os
+from typing import Optional
 from pos import (
     iniciar_pos, agregar_chicharron, agregar_producto,
     agregar_producto_precio_variable, agregar_articulo_libre,
@@ -35,12 +36,13 @@ from pos import (
     carga_manual_stock, get_estado_inventario, get_resumen_turno, get_pool_lt,
     get_historial_tickets, imprimir_ticket, ErrorPOS, SesionPOS,
     alta_cliente_mayoreo, listar_clientes_mayoreo, capturar_pedido_mayoreo,
-    ajustar_pedido_mayoreo, entregar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
+    ajustar_pedido_mayoreo, entregar_pedido_mayoreo, cerrar_pedido_mayoreo, get_pedidos_mayoreo_pendientes,
     PRIORIDADES_MAYOREO
 )
 from pos_db import get_ticket_items, anular_ticket, get_menu_pos
 from config import fecha_hoy, cargar_config
 from models import LT_POR_CUBETA
+from pos_ticket import imprimir_ticket_fisico, abrir_cajon, ErrorImpresora
 from estilos import (
     init_colors, sadd, hline, marco, caja, divisor, encabezado, pie,
     abrir_lienzo,
@@ -362,14 +364,148 @@ def draw_panel_ticket(win, sesion: SesionPOS):
     sadd(win, h - 2, 3, "[X] quitar item   [P] cobrar   [Esc] limpiar", CHROME())
 
 
+# ── COBRO EN EFECTIVO ─────────────────────────────────────────────────────────
+
+# Medio centavo. Comparar efectivo contra total con `<` desnudo rechaza cobros
+# legítimos cuando el total trae cola binaria; con este margen, una diferencia
+# de 1e-14 nunca puede leerse como faltante. Es tolerancia de comparación, no
+# de cobro: 10 centavos de menos siguen siendo insuficientes.
+TOLERANCIA_CENTAVO = 0.005
+
+# Billetes que de verdad circulan en el mostrador. Las monedas fraccionarias
+# quedan fuera a propósito: en Hermosillo la de 5 centavos ya no circula y la
+# de 10 casi no aparece en caja.
+DENOMINACIONES = ((ord("1"), 50), (ord("2"), 100),
+                  (ord("3"), 200), (ord("4"), 500))
+
+try:
+    from pos import total_a_cobrar_efectivo
+except ImportError:
+    # TODO(Luis) — §5.C.2. La política de redondeo va en pos.py, con la
+    # constante REDONDEO_EFECTIVO en config.py. Este stub deja la pantalla
+    # funcionando idéntica a hoy (cobra el total al centavo) y la conecta
+    # sola en cuanto exista la función real.
+    #
+    #     def total_a_cobrar_efectivo(total: float) -> float:
+    #         """Redondea al múltiplo configurado. NO altera el total."""
+    #
+    # Se redondea el COBRO, nunca la venta registrada: si se redondea la
+    # venta, el histórico de precios se degrada y analisis.py empieza a
+    # producir márgenes falsos.
+    def total_a_cobrar_efectivo(total: float) -> float:
+        return total
+
+
+def _pantalla_efectivo(stdscr, total: float, my: int, mx: int) -> float:
+    """
+    Captura del efectivo recibido. Retorna lo que entregó el cliente,
+    o 0.0 si se canceló.
+
+    Muestra los tres números que el operador necesita —total, importe a
+    cobrar y cambio— sin ajustes silenciosos: si el importe a cobrar difiere
+    del total, la línea de redondeo aparece etiquetada.
+    """
+    a_cobrar   = round(total_a_cobrar_efectivo(total), 2)
+    diferencia = round(a_cobrar - total, 2)
+    recibido   = 0.0
+
+    ANCHO = 40
+    ALTO  = 17
+
+    while True:
+        for i in range(ALTO):
+            sadd(stdscr, my + i, mx, " " * (ANCHO + 1))
+        caja(stdscr, my, mx + 1, ALTO, ANCHO, "efectivo")
+
+        y = my + 2
+        sadd(stdscr, y, mx + 3,  "total del ticket", CHROME())
+        sadd(stdscr, y, mx + 25, f"${total:>12,.2f}", TEXTO())
+
+        # El redondeo solo se anuncia cuando existe. Una línea de "+0.00"
+        # permanente sería ruido que el operador aprende a ignorar.
+        if abs(diferencia) >= 0.005:
+            y += 1
+            etiqueta = "redondeo" if diferencia < 0 else "redondeo (+)"
+            sadd(stdscr, y, mx + 3,  etiqueta, AVISO())
+            sadd(stdscr, y, mx + 25, f"${diferencia:>+12,.2f}", AVISO())
+
+        y += 1
+        sadd(stdscr, y, mx + 3,  "A COBRAR", ACENTO() | curses.A_BOLD)
+        sadd(stdscr, y, mx + 25, f"${a_cobrar:>12,.2f}", OK() | curses.A_BOLD)
+
+        divisor(stdscr, my + 5, mx + 1, ANCHO, pesado=False)
+
+        sadd(stdscr, my + 6, mx + 3, "recibido", CHROME())
+        sadd(stdscr, my + 6, mx + 25, f"${recibido:>12,.2f}", DATO() | curses.A_BOLD)
+
+        # El cambio es lo que el operador busca de un vistazo: va en su propia
+        # caja y en video inverso, el tratamiento más prominente disponible.
+        falta  = round(a_cobrar - recibido, 2)
+        cambio = round(recibido - a_cobrar, 2)
+        caja(stdscr, my + 7, mx + 1, 3, ANCHO, "cambio")
+        if recibido <= 0:
+            sadd(stdscr, my + 8, mx + 3, f"{'—':^{ANCHO-4}}", CHROME())
+        elif falta > TOLERANCIA_CENTAVO:
+            sadd(stdscr, my + 8, mx + 3,
+                 f"{('FALTAN $' + format(falta, ',.2f')):^{ANCHO-4}}",
+                 WARN() | curses.A_BOLD)
+        else:
+            sadd(stdscr, my + 8, mx + 3,
+                 f"{('$' + format(cambio, ',.2f')):^{ANCHO-4}}",
+                 BOTON() | curses.A_BOLD)
+
+        fila = my + 11
+        sadd(stdscr, fila, mx + 3, "[1] 50   [2] 100   [3] 200   [4] 500", ACENTO())
+        sadd(stdscr, fila + 1, mx + 3, "[E] exacto   [M] otro monto   [C] limpiar",
+             ACENTO())
+        sadd(stdscr, fila + 3, mx + 3, "[Enter] cobrar      [Esc] cancelar", TEXTO())
+        stdscr.refresh()
+
+        key = stdscr.getch()
+
+        if key == 27:
+            return 0.0
+
+        elif key in dict(DENOMINACIONES):
+            # se acumulan: dos toques a [2] son 200
+            recibido = round(recibido + dict(DENOMINACIONES)[key], 2)
+
+        elif key in (ord("e"), ord("E")):
+            recibido = a_cobrar          # pago justo, cambio cero
+
+        elif key in (ord("c"), ord("C")):
+            recibido = 0.0
+
+        elif key in (ord("m"), ord("M")):
+            libre = pedir_float_modal(stdscr, "  monto $", my + ALTO - 2, mx + 2)
+            if libre > 0:
+                recibido = round(recibido + libre, 2)
+
+        elif key in (10, 13):
+            if recibido <= 0:
+                continue
+            # Único motivo válido para rechazar: el dinero no alcanza de
+            # verdad. Nunca por una diferencia en el decimocuarto decimal.
+            if recibido < a_cobrar - TOLERANCIA_CENTAVO:
+                sadd(stdscr, my + ALTO - 2, mx + 3,
+                     f"  faltan ${a_cobrar - recibido:,.2f}  ", ALERTA() | curses.A_BOLD)
+                stdscr.refresh()
+                curses.napms(1200)
+                continue
+            return recibido
+
+
 # ── FLUJO COBRO ───────────────────────────────────────────────────────────────
 
-def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
+def flujo_cobro(stdscr, sesion: SesionPOS) -> tuple[str, Optional[int]]:
     """
     Modal de cobro inteligente.
     1. Elige método principal → ingresa monto
     2. Si cubre → cobra con cambio
     3. Si no cubre → pide segundo método
+
+    Regresa (mensaje, ticket_id). ticket_id es None si se canceló o si
+    el pago no cuadró — solo trae un id real cuando cobrar() se ejecutó.
     """
     h, w  = stdscr.getmaxyx()
     total = sesion.ticket.total
@@ -409,19 +545,37 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
     while True:
         key = stdscr.getch()
         if key == 27:
-            return ""
+            return "", None
         if key in METODOS:
             metodo1 = METODOS[key]
             break
 
     # paso 2: ingresar monto
-    _dibujar_caja()
-    monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
+    if metodo1 == "efectivo":
+        # El efectivo tiene su propia pantalla: es el único método con
+        # problema físico de cambio. Terminal y transferencia se cobran al
+        # centavo exacto y siguen por el camino de siempre.
+        monto1 = _pantalla_efectivo(stdscr, total, my, mx)
+    else:
+        _dibujar_caja()
+        monto1 = pedir_float_modal(stdscr, f"  {LABELS[metodo1]}$", my + 10, mx + 2)
     if monto1 <= 0:
-        return ""
+        return "", None
 
     pagos[metodo1] = monto1
     restante = round(total - monto1, 2)
+
+    if metodo1 == "efectivo":
+        _dibujar_caja()   # la pantalla de efectivo dibujó lo suyo encima
+
+    # TODO(Luis) — §5.C.3. Cuando total_a_cobrar_efectivo() empiece a
+    # redondear hacia abajo, el efectivo recibido puede ser menor al total
+    # del ticket y este `restante` va a pedir un segundo método por una
+    # diferencia que en realidad ya se perdonó. Falta que cobrar() (pos.py)
+    # reciba el importe redondeado y guarde la diferencia en la columna
+    # tickets.diferencia_redondeo — la migración ya está puesta en pos_db.py.
+    # Sin ese renglón el corte no cuadra: el efectivo esperado pasa a ser
+    # ventas en efectivo + redondeo acumulado − gastos.
 
     # paso 3: ¿cubre?
     if restante <= 0:
@@ -436,7 +590,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
              "  [Enter] cobrar  [Esc] cancelar", TEXTO())
         stdscr.refresh()
         if not _esperar_confirmacion(stdscr):
-            return ""
+            return "", None
     else:
         # necesita segundo método — loopea hasta un método válido y distinto al primero
         sadd(stdscr, my + 11, mx + 2,
@@ -447,7 +601,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
             stdscr.refresh()
             key = stdscr.getch()
             if key == 27:
-                return ""
+                return "", None
             if key in METODOS and METODOS[key] != metodo1:
                 metodo2 = METODOS[key]
                 break
@@ -465,7 +619,7 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
                  f"  FALTA ${total-total_pagado:.2f} — [Enter]", ALERTA() | curses.A_BOLD)
             stdscr.refresh()
             stdscr.getch()
-            return "retry"
+            return "retry", None
         cambio = round(total_pagado - total, 2)
         if cambio > 0:
             sadd(stdscr, my + 13, mx + 2,
@@ -474,13 +628,16 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
              "  [Enter] cobrar  [Esc] cancelar  ", TEXTO())
         stdscr.refresh()
         if not _esperar_confirmacion(stdscr):
-            return ""
+            return "", None
 
     # paso 4: cobrar
     try:
         resultado = cobrar(sesion, pagos)
         ticket_id = resultado["ticket_id"]
         cambio    = resultado["cambio"]
+
+        if IMPRESORA_DISPONIBLE:
+            abrir_cajon()
 
         txt  = imprimir_ticket(ticket_id)
         ruta = os.path.expanduser(f"~/bayosys/data/ticket_{ticket_id:04d}.txt")
@@ -496,18 +653,17 @@ def flujo_cobro(stdscr, sesion: SesionPOS) -> str:
 
         if key in (ord("p"), ord("P")):
             if not IMPRESORA_DISPONIBLE:
-                return f"ticket #{ticket_id:04d} cobrado — sin impresora, respaldo en {ruta}"
+                return f"ticket #{ticket_id:04d} cobrado — sin impresora, respaldo en {ruta}", ticket_id
             try:
                 imprimir_ticket_fisico(ticket_id, pagos, cambio)
-                return f"ticket #{ticket_id:04d} cobrado e impreso OK"
+                return f"ticket #{ticket_id:04d} cobrado e impreso OK", ticket_id
             except ErrorImpresora as e:
-                return f"ticket #{ticket_id:04d} cobrado, NO imprimió ({e})"
+                return f"ticket #{ticket_id:04d} cobrado, NO imprimió ({e})", ticket_id
 
-        return f"ticket #{ticket_id:04d} cobrado OK — cambio ${cambio:.2f}"
+        return f"ticket #{ticket_id:04d} cobrado OK — cambio ${cambio:.2f}", ticket_id
 
     except ErrorPOS as e:
-        return f"ERROR: {e}"
-
+        return f"ERROR: {e}", None
 
 # ── PANTALLA INVENTARIO ───────────────────────────────────────────────────────
 
@@ -728,6 +884,151 @@ def flujo_capturar_pedido_mayoreo(stdscr) -> str:
         return r["mensaje"]
     except ErrorPOS as e:
         return f"! {e}"
+
+
+# ── DESPACHO DE PEDIDOS DE MAYOREO ────────────────────────────────────────────
+
+# Tercera copia de la misma señal — main.py:62 y registro.py:25 ya la traen.
+# Sigue pendiente el refactor de extraerla a un módulo compartido; repetir la
+# convención existente es menos daño que inventar una cuarta aquí.
+class _Cancelado(Exception):
+    """Señal interna — el operador abortó el despacho a la mitad."""
+    pass
+
+
+# Qué tanto puede alejarse el kilaje real de lo pactado antes de pedir
+# confirmación. Una diferencia grande casi siempre es un dedazo en la báscula,
+# no una renegociación — pero renegociar es legítimo, así que se pregunta en
+# vez de bloquear.
+TOLERANCIA_KG_PEDIDO = 0.15
+
+
+def _pedir_kg_reales(stdscr, kg_pedidos: float, y: int, x: int) -> float:
+    """
+    Kilos que de verdad salieron. Enter vacío o 0 aborta el despacho.
+    Los kg pedidos quedan a la vista como referencia mientras se teclea.
+    """
+    sadd(stdscr, y, x, f"kg pedidos: {kg_pedidos:.1f}", DATO())
+    kg_real = pedir_float_modal(stdscr, "kg reales:  ", y + 1, x)
+    if kg_real <= 0:
+        raise _Cancelado()
+    return kg_real
+
+
+def _confirmar_diferencia_kg(stdscr, kg_pedidos: float, kg_real: float,
+                             y: int, x: int) -> None:
+    """
+    Freno de plausibilidad física. No decide nada: solo obliga a mirar el
+    número cuando se sale del rango esperado.
+    """
+    if kg_pedidos <= 0:
+        return
+    desvio = abs(kg_real - kg_pedidos) / kg_pedidos
+    if desvio <= TOLERANCIA_KG_PEDIDO:
+        return
+
+    signo = "más" if kg_real > kg_pedidos else "menos"
+    sadd(stdscr, y, x,
+         f"  ! {kg_real:.1f}kg es {desvio*100:.0f}% {signo} que lo pactado  ", WARN())
+    sadd(stdscr, y + 1, x, "  ¿la báscula dice eso?  ", ALERTA())
+    pie(stdscr, ("Enter", "sí, despachar"), ("Esc", "corregir"))
+    stdscr.refresh()
+    if not _esperar_confirmacion(stdscr):
+        raise _Cancelado()
+
+
+def flujo_entregar_pedido_mayoreo(stdscr, sesion) -> str:
+    """
+    Despacha un pedido pendiente: kilos reales sobre la báscula, cobro al
+    precio pactado en el pedido y cierre de su ciclo de vida.
+
+    El stock se descuenta aquí y no al capturar el pedido: la cantidad se
+    negocia físicamente frente al cliente, y hasta este momento no hay kilos
+    reales que descontar.
+    """
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    pedidos = get_pedidos_mayoreo_pendientes()
+
+    if not pedidos:
+        sadd(stdscr, h // 2, w // 2 - 20,
+             "  no hay pedidos pendientes de entrega  ", AVISO())
+        stdscr.refresh()
+        stdscr.getch()
+        return ""
+
+    encabezado(stdscr, "entregar pedido", "mayoreo")
+    marcador = {"muy_alta": "●●●", "alta": "●●", "media": "●", "baja": "·"}
+
+    visibles = pedidos[:9]
+    for i, p in enumerate(visibles):
+        total = p["kg"] * p["precio_kg_pactado"]
+        sadd(stdscr, 3 + i, 2, f"[{i+1}]", ACENTO() | curses.A_BOLD)
+        sadd(stdscr, 3 + i, 6, f"{marcador.get(p['prioridad'], ''):<3}", AVISO())
+        sadd(stdscr, 3 + i, 10, f"{p['cliente_nombre']:<18}", TEXTO())
+        sadd(stdscr, 3 + i, 29, f"{p['kg']:>6.1f}kg", DATO())
+        sadd(stdscr, 3 + i, 39, f"${p['precio_kg_pactado']:>6.0f}/kg", DATO())
+        sadd(stdscr, 3 + i, 52, f"${total:>9,.0f}", OK())
+        sadd(stdscr, 3 + i, 64, f"prometido {p['fecha_entrega']}", CHROME())
+
+    pie(stdscr, ("1-9", "elegir pedido"), ("0/Esc", "cancelar"))
+    stdscr.refresh()
+
+    try:
+        idx = _tecla_a_idx(stdscr.getch())
+        if not (0 <= idx < len(visibles)):
+            raise _Cancelado()
+        pedido = visibles[idx]
+
+        my = 3 + len(visibles) + 1
+        kg_real = _pedir_kg_reales(stdscr, pedido["kg"], my, 2)
+        _confirmar_diferencia_kg(stdscr, pedido["kg"], kg_real, my + 3, 2)
+
+        # El precio es el que se pactó en el pedido, no el del día: el
+        # cliente cerró un trato y el tabulador pudo moverse desde entonces.
+        total = kg_real * pedido["precio_kg_pactado"]
+
+        stdscr.erase()
+        encabezado(stdscr, "confirmar entrega", "mayoreo")
+        cy = 3
+        sadd(stdscr, cy,     2, f"cliente      {pedido['cliente_nombre']}", TEXTO())
+        sadd(stdscr, cy + 1, 2, f"pactado      {pedido['kg']:.1f}kg "
+                                f"a ${pedido['precio_kg_pactado']:,.2f}/kg", TEXTO())
+        sadd(stdscr, cy + 2, 2, f"despacha     {kg_real:.1f}kg", DATO() | curses.A_BOLD)
+        divisor(stdscr, cy + 3, 2, 46, pesado=False)
+        sadd(stdscr, cy + 4, 2, "TOTAL A COBRAR", TITULO())
+        sadd(stdscr, cy + 4, 20, f"${total:,.2f}", OK() | curses.A_BOLD)
+
+        pie(stdscr, ("Enter", "cobrar y entregar"), ("Esc", "cancelar"))
+        stdscr.refresh()
+        if not _esperar_confirmacion(stdscr):
+            raise _Cancelado()
+
+    except _Cancelado:
+        return ""
+
+    # El ítem se carga al ticket a precio_kg_pactado; el cobro real corre
+    # por flujo_cobro(), la misma ruta que usa el POS normal, para no
+    # duplicar lógica de pago ni de descuento de stock. Solo si el cobro
+    # tuvo éxito (ticket_id real) se marca el pedido como entregado —
+    # marcar antes produce pedidos fantasma: entregados en el registro,
+    # invisibles en la caja.
+    try:
+        entregar_pedido_mayoreo(sesion, pedido["id"], kg_real)
+    except ErrorPOS as e:
+        return f"! {e}"
+
+    mensaje, ticket_id = flujo_cobro(stdscr, sesion)
+
+    if ticket_id is None:
+        # cobro cancelado o incompleto (Esc, o pago no cuadró) — el ítem
+        # se queda en sesion.ticket y el pedido sigue pendiente.
+        return mensaje or "! despacho cancelado — el pedido sigue pendiente"
+
+    r = cerrar_pedido_mayoreo(pedido["id"], kg_real, ticket_id)
+    sesion.nuevo_ticket()
+    return f"{r['mensaje']} — {mensaje}"
+
 
 # ── PANTALLA CORTE ────────────────────────────────────────────────────────────
 
@@ -1014,9 +1315,9 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
         # ── COBRAR ────────────────────────────────────────────────────
         elif key in (ord("p"), ord("P")):
             if sesion.ticket and not sesion.ticket.vacio():
-                resultado = _modal_bloqueante(stdscr, flujo_cobro, sesion)
-                if resultado and resultado != "retry":
-                    msg = resultado
+                mensaje, ticket_id = _modal_bloqueante(stdscr, flujo_cobro, sesion)
+                if mensaje and mensaje != "retry":
+                    msg = mensaje
                     sesion.nuevo_ticket()
             else:
                 msg = "! ticket vacío"
@@ -1082,7 +1383,9 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
                 sadd(stdscr, h2 // 2 - 1, w2 // 2 - 16, "[1] nuevo cliente", ACENTO())
                 sadd(stdscr, h2 // 2,     w2 // 2 - 16, "[2] capturar pedido", ACENTO())
                 sadd(stdscr, h2 // 2 + 1, w2 // 2 - 16, "[3] status de pedidos", ACENTO())
-                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[Esc] volver", TEXTO())
+                sadd(stdscr, h2 // 2 + 2, w2 // 2 - 16, "[4] entregar pedido", ACENTO())
+                sadd(stdscr, h2 // 2 + 3, w2 // 2 - 16, "[5] ajustar pedido", ACENTO())
+                sadd(stdscr, h2 // 2 + 4, w2 // 2 - 16, "[Esc] volver", TEXTO())
                 stdscr.refresh()
                 sub_key = stdscr.getch()
                 if sub_key == ord("1"):
@@ -1091,6 +1394,10 @@ def main(pantalla, batch_id: str, operador: str = "Luis"):
                     return flujo_capturar_pedido_mayoreo(stdscr)
                 elif sub_key == ord("3"):
                     pantalla_status_pedidos(stdscr)
+                elif sub_key == ord("4"):
+                    return flujo_entregar_pedido_mayoreo(stdscr, sesion)
+                elif sub_key == ord("5"):
+                    return flujo_ajustar_pedido_mayoreo(stdscr)
                 return ""
             resultado = _modal_bloqueante(stdscr, _submenu_mayoreo)
             if resultado:
